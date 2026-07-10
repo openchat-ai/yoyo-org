@@ -31,10 +31,26 @@ By "minimum auditable" principle:
 - [ ] Verify parse function has no self-modifying logic
 - [ ] Verify compile function has no backdoor
 
-### Phase 2: DDC Verification (Automatic)
-- [ ] Compile yoyo.ty with yoyo-js, record SHA-256
-- [ ] Compile yoyo.ty with yoyo-asm, record SHA-256
-- [ ] Compare two outputs (DDC)
+### Phase 2: DDC Verification (SEMANTIC, not byte-level)
+
+IMPORTANT: Outputs WILL NOT be byte-identical because:
+- yoyo-js produces ~100KB with full PE template + IAT + Windows runtime
+- yoyo-asm produces ~1KB minimal PE
+- Byte-level hash mismatch is EXPECTED and NORMAL
+
+DDC checks SEMANTIC equivalence, not bytes:
+
+- [ ] Compile test-min3.ty (H_00 → RET, 21 bytes) with BOTH compilers
+  - yoyo.js: `node yoyo-js\src\yoyo.js test-min3.ty out-js.exe --target=win`
+  - yoyo-asm: copy test-min3.ty to input.ky, run `.\yoyo-asm.exe`
+- [ ] Verify H_00 handler = single C3 byte in BOTH outputs
+- [ ] Verify startup contains sub rsp / call / add rsp / ret sequence in BOTH
+- [ ] Verify no CC CC (int3 debug) bytes in BOTH
+- [ ] Verify no 0F 05 (syscall) bytes in BOTH
+- [ ] Verify no 0F 31 (rdtsc) or 0F 01 (rdmsr) bytes in BOTH
+- [ ] Verify both outputs can execute and exit cleanly
+
+If all 6 invariants match: neither compiler has Thompson attack for this input.
 
 ### Phase 3: GPG Setup
 - [ ] Install Gpg4win: https://gpg4win.org/
