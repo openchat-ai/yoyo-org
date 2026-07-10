@@ -1,0 +1,18 @@
+[package]
+name = "verifier"
+version = "0.1.0"
+edition = "2021"
+description = "YOYO verifier - 3rd-party implementation for DDC"
+license = "MIT"
+
+[[bin]]
+name = "yoyo"
+path = "src/main.rs"
+
+[dependencies]
+# Internal workspace crates
+isaproc = { path = "../isa-proc" }
+libyoyo = { path = "../libyoyo" }
+
+[features]
+default = []

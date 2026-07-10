@@ -1,0 +1,3 @@
+; yoy0-min-ret.ty — just H_00 → FF (RET)
+00 00 40 00
+00 00 ff

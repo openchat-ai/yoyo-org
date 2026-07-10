@@ -1,0 +1,43 @@
+# Build artifacts
+/target/
+
+# Temporary debug scripts
+/debug-emit.ps1
+/dump-emit-bytes.ps1
+/inspect-linux-h00.ps1
+
+# =====================================================
+# YOYO Personal Trust Record
+# =====================================================
+# 这些文件**永远不**推送到 GitHub。
+# 它们只是给你自己看的，不是 YOYO 公开信任记录的一部分。
+# 公开信任记录用对应的英文版（已 GPG 签名）。
+# =====================================================
+
+# 用户的私人审计/签收模板（中文版）
+docs/custody/*.zh.md
+docs/custody/*.zh.txt
+docs/custody/01-audit-yoyo-js.zh.md
+docs/custody/02-audit-isa.zh.md
+docs/custody/04-SELF_HOST_VERIFIED.zh.md
+docs/custody/05-DDC_VERIFIED.zh.md
+docs/custody/06-FROZEN.zh.md
+docs/custody/README.zh.md
+
+# 用户清单（中文版）
+docs/14-user-checklist.zh.md
+
+# 中文索引
+docs/README.zh.md
+
+# =====================================================
+# YOYO 公开信任记录（这些必须推送 + GPG 签名）
+# =====================================================
+# docs/custody/01-audit-yoyo-js.md        ← 必须签名
+# docs/custody/02-audit-isa.md            ← 必须签名
+# docs/custody/03-GOLDEN_HASH.txt         ← 必须签名
+# docs/custody/04-SELF_HOST_VERIFIED.md  ← 必须签名
+# docs/custody/05-DDC_VERIFIED.md        ← 必须签名
+# docs/custody/06-FROZEN.md              ← 必须签名
+# docs/custody/README.md                  ← 公开
+# =====================================================

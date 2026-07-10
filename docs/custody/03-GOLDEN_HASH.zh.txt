@@ -1,0 +1,1 @@
+﻿# 请勿手动编辑此文�?# 此文件是 YOYO 的加密信任根�?# 它是已审计的 yoyo.js 种子编译器的 SHA-256 哈希�?# 要重新生成：$ sha256sum yoyo-js/src/yoyo.js > 03-GOLDEN_HASH.txt# 然后用以下命令重新签名：$ gpg --sign --detach-sign 03-GOLDEN_HASH.txt# 格式�?sha256-哈希>  <相对路径># 示例：a1b2c3d4e5f6789...  ../../yoyo-js/src/yoyo.js[YOYO_JS 的哈希]  ../../yoyo-js/src/yoyo.js

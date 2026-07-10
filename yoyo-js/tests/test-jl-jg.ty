@@ -1,0 +1,24 @@
+; 测试 jl/jg 编译
+; main: state_50 = -5; if state_50 < 0 -> 50
+40 20
+30 50 FB       ; state_50 = -5 (signed)
+65 50 52       ; cmp state_50, state_52
+73 21          ; jl H_21  (state_50 < 0)
+30 50 99       ; else: state_50 = 0x99
+70 22          ; jmp end
+40 21
+30 50 50       ; then: state_50 = 0x50
+40 22
+FF
+
+; state_50 = 3; if state_50 > 0 -> AA
+40 23
+30 50 03
+65 50 52
+76 24          ; jg H_24
+30 50 BB
+70 25
+40 24
+30 50 AA
+40 25
+FF
