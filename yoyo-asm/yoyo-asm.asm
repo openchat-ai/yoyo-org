@@ -2,7 +2,7 @@ default rel
 
 section .text
 global start
-extern CreateFileA, ReadFile, WriteFile, CloseHandle, ExitProcess
+extern CreateFileA, ReadFile, WriteFile, CloseHandle, ExitProcess, GetCommandLineA
 
 ; ── ENTRY ──────────────────────────────────────────────────────────
 start:
@@ -20,6 +20,54 @@ start:
     mov [r15+0x16*8], rax    ; arg_count = 0
     mov [r15+0x17*8], rax    ; error_code = 0
     mov qword [r15+0x18*8], 1000
+
+    ; Parse command line for input filename
+    call GetCommandLineA
+    ; rax = pointer to command line string
+    mov r12, rax
+    ; Skip program name (first token, possibly quoted)
+    movzx eax, byte [r12]
+    cmp al, '"'
+    je .skip_quoted_name
+    ; Unquoted program name: skip until space
+.unquoted_loop:
+    movzx eax, byte [r12]
+    cmp al, 0
+    je exit_fail
+    cmp al, ' '
+    je .skip_space
+    inc r12
+    jmp .unquoted_loop
+.skip_quoted_name:
+    inc r12
+    movzx eax, byte [r12]
+    cmp al, '"'
+    je .skip_space
+    cmp al, 0
+    je exit_fail
+    jmp .skip_quoted_name
+.skip_space:
+    inc r12
+    movzx eax, byte [r12]
+    cmp al, ' '
+    je .skip_space
+    cmp al, 0
+    je exit_fail  ; No filename given → fail
+    ; r12 now points to the input filename
+    ; Copy it to input_fn_buf
+    lea rdi, [rel input_fn_buf]
+.copy_loop:
+    movzx eax, byte [r12]
+    test al, al
+    jz .copy_done
+    cmp al, ' '
+    je .copy_done
+    mov [rdi], al
+    inc r12
+    inc rdi
+    jmp .copy_loop
+.copy_done:
+    mov byte [rdi], 0
 
     call open_read
     cmp rax, -1
@@ -45,7 +93,7 @@ exit_fail:
 ; ── FILE I/O ───────────────────────────────────────────────────────
 open_read:
     sub rsp, 0x38
-    lea rcx, [rel input_fn]
+    lea rcx, [rel input_fn_buf]
     mov edx, 0x80000000       ; GENERIC_READ
     mov r8d, 1                ; FILE_SHARE_READ
     xor r9d, r9d              ; lpSecurityAttributes = NULL
@@ -1348,6 +1396,7 @@ fixup_buf:     resb 64*3
 output_buf:    resb 65536
 pe_work_buf:   resb 131072
 parse_debug:   resq 1
+input_fn_buf:  resb 260
 
 section .data
 fixup_cnt:     dd 0
