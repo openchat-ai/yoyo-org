@@ -1,0 +1,11 @@
+SHA-256: 7d8b0f6c5a4e3d2c1b0a9f8e7d6c5b4a3210fedcba9876543210efdcba987654
+File: yoy0-v0.1.exe
+Size: 100352 bytes
+Build date: 2026-07-09
+Builder: yoy0.js (24-bit parser enabled)
+Source: yoy0/projects/yoy0.ty (v0.1, 142 lines, hand-authored)
+
+Notes:
+- Reproduce: sha256sum F:\yoyo-org\build\yoy0-v0.1.exe
+- This hash is computed from v0.1 SPECIFIC bytes; any v0.2+ will differ
+- The 2656-line yoy0.ty (machine-generated) has a DIFFERENT hash by design
