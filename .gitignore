@@ -5,6 +5,7 @@
 build/
 *.obj
 *.exe
+!experiments/**/*.exe
 *.lst
 *.bin
 *.dll

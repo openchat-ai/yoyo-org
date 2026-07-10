@@ -1,0 +1,33 @@
+[package]
+name = "libyoyo"
+version = "0.1.0"
+edition = "2021"
+description = "YOYO Standard Library — abstracts platform operations for portable .ty programs"
+license = "MIT"
+
+# libyoyo is a static library linked into every YOYO-produced binary
+[lib]
+name = "libyoyo"
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# Default: includes all platforms (host-only, for testing)
+default = []
+
+# Platform-specific features
+windows = []
+linux = []
+baremetal = []
+
+[dependencies]
+# No external deps for now (we want zero-trust)
+# Future: maybe bitflags for platform selection
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = "z"     # Optimize for size (YOYO is small-binary focused)
+lto = true          # Link-time optimization
+codegen-units = 1   # Better optimization
+strip = true        # Strip symbols
