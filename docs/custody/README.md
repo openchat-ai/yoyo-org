@@ -1,3 +1,22 @@
+﻿# ⚠️ STATUS: TEMPLATE — NOT YET SIGNED ⚠️
+
+> **This document is an unsigned template.**
+>
+> **Do not treat the content below as a valid attestation.**
+> All `[Author]`, `[YYYY-MM-DD]`, `[GPG key ID]`, `[HASH]`, etc. are placeholders
+> that have NOT been filled in with real values.
+>
+> Real audit and GPG signing are pending. This file is in the repo only
+> to document what the *final* signed version will look like.
+>
+> See branch `wip/mark-custody-as-template` for tracking.
+>
+> ---
+>
+> The content below this banner is **placeholder content**, not actual
+> attestation. Do NOT cite it as evidence of any audit or verification.
+
+---
 # docs/custody/ — Your Personal Trust Record
 
 > This folder contains **the 6 files that only you can create**. They form the public trust record of YOYO. After you fill these in, sign with GPG, and push to GitHub, YOYO is officially "trustworthy by your signature".
