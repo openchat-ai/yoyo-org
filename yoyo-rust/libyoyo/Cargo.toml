@@ -23,9 +23,6 @@ baremetal = []
 # No external deps for now (we want zero-trust)
 # Future: maybe bitflags for platform selection
 
-[profile.dev]
-panic = "abort"
-
 [profile.release]
 opt-level = "z"     # Optimize for size (YOYO is small-binary focused)
 lto = true          # Link-time optimization
