@@ -1,0 +1,60 @@
+# Only upload what's needed for experiment reproducibility + memory
+# Everything else in yoyo-org is local-only
+
+# Build outputs
+build/
+*.obj
+*.exe
+*.lst
+*.bin
+*.dll
+
+# Test / debug artifacts
+*-broken.*
+*.bak
+*.wsl
+*debug*
+
+# Specific yoyo-asm debug files
+yoyo-asm/yoy0-*
+yoyo-asm/temp-*
+yoyo-asm/code_dump.bin
+yoyo-asm/run-test-output.exe
+yoyo-asm/test-minimal.asm
+yoyo-asm/test-ret.asm
+yoyo-asm/mini-parse.asm
+yoyo-asm/build-yoyo-asm.mjs
+yoyo-asm/output-v*.exe
+yoyo-asm/yoyo-asm.v*.asm
+yoyo-asm/yoyo-asm.v*.exe
+yoyo-asm/v3-final.exe
+yoyo-asm/yoyo-asm-core.asm
+
+# Per-project tool artifacts (out of scope for this repo)
+yoy0/
+yoyo/
+yoyo-asm/platform/
+
+# Local scripts used during debugging
+insert-section.ps1
+inspect-pe.ps1
+inspect-pe2.ps1
+mini-parse.asm
+mini-parse.exe
+mini-parse.obj
+test-minimal.exe
+test-ret.exe
+yoy0-asm.exe
+yoy0-js.exe
+yoy0-js-v0.1.exe
+yoy0-rs-v0.1.exe
+yoy0-v0.1.exe
+yoyo-asm-dbg.obj
+yoyo-v0.1-24bit.exe
+yoyo-v0.1.exe
+yoyo-v0.2.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
