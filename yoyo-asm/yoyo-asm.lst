@@ -1,0 +1,1642 @@
+     1                                  default rel
+     2                                  
+     3                                  section .text
+     4                                  global start
+     5                                  extern CreateFileA, ReadFile, WriteFile, CloseHandle, ExitProcess, GetCommandLineA
+     6                                  
+     7                                  ; ── ENTRY ──────────────────────────────────────────────────────────
+     8                                  start:
+     9 00000000 4883EC28                    sub rsp, 0x28
+    10                                  
+    11 00000004 4C8D3D(00000000)            lea r15, [rel state_buf]
+    12 0000000B 31C0                        xor eax, eax
+    13 0000000D 49894770                    mov [r15+0x0E*8], rax    ; code_offset = 0
+    14 00000011 49898780000000              mov [r15+0x10*8], rax    ; scanner_state = 0
+    15 00000018 49898788000000              mov [r15+0x11*8], rax    ; acc = 0
+    16 0000001F 49898790000000              mov [r15+0x12*8], rax    ; digit_count = 0
+    17 00000026 49898798000000              mov [r15+0x13*8], rax    ; current_opcode = 0
+    18 0000002D 498987A0000000              mov [r15+0x14*8], rax    ; arg_index = 0
+    19 00000034 498987A8000000              mov [r15+0x15*8], rax    ; emit_state = 0
+    20 0000003B 498987B0000000              mov [r15+0x16*8], rax    ; arg_count = 0
+    21 00000042 498987B8000000              mov [r15+0x17*8], rax    ; error_code = 0
+    22 00000049 49C787C0000000E803-         mov qword [r15+0x18*8], 1000
+    22 00000052 0000               
+    23                                  
+    24                                      ; Parse command line for input filename
+    25 00000054 E8(00000000)                call GetCommandLineA
+    26                                      ; rax = pointer to command line string
+    27 00000059 4989C4                      mov r12, rax
+    28                                      ; Skip program name (first token, possibly quoted)
+    29 0000005C 410FB60424                  movzx eax, byte [r12]
+    30 00000061 3C22                        cmp al, '"'
+    31 00000063 7416                        je .skip_quoted_name
+    32                                      ; Unquoted program name: skip until space
+    33                                  .unquoted_loop:
+    34 00000065 410FB60424                  movzx eax, byte [r12]
+    35 0000006A 3C00                        cmp al, 0
+    36 0000006C 0F8484000000                je exit_fail
+    37 00000072 3C20                        cmp al, ' '
+    38 00000074 7417                        je .skip_space
+    39 00000076 49FFC4                      inc r12
+    40 00000079 EBEA                        jmp .unquoted_loop
+    41                                  .skip_quoted_name:
+    42 0000007B 49FFC4                      inc r12
+    43 0000007E 410FB60424                  movzx eax, byte [r12]
+    44 00000083 3C22                        cmp al, '"'
+    45 00000085 7406                        je .skip_space
+    46 00000087 3C00                        cmp al, 0
+    47 00000089 746B                        je exit_fail
+    48 0000008B EBEE                        jmp .skip_quoted_name
+    49                                  .skip_space:
+    50 0000008D 49FFC4                      inc r12
+    51 00000090 410FB60424                  movzx eax, byte [r12]
+    52 00000095 3C20                        cmp al, ' '
+    53 00000097 74F4                        je .skip_space
+    54 00000099 3C00                        cmp al, 0
+    55 0000009B 7459                        je exit_fail  ; No filename given → fail
+    56                                      ; r12 now points to the input filename
+    57                                      ; Copy it to input_fn_buf
+    58 0000009D 488D3D(C8260300)            lea rdi, [rel input_fn_buf]
+    59                                  .copy_loop:
+    60 000000A4 410FB60424                  movzx eax, byte [r12]
+    61 000000A9 84C0                        test al, al
+    62 000000AB 740E                        jz .copy_done
+    63 000000AD 3C20                        cmp al, ' '
+    64 000000AF 740A                        je .copy_done
+    65 000000B1 8807                        mov [rdi], al
+    66 000000B3 49FFC4                      inc r12
+    67 000000B6 48FFC7                      inc rdi
+    68 000000B9 EBE9                        jmp .copy_loop
+    69                                  .copy_done:
+    70 000000BB C60700                      mov byte [rdi], 0
+    71                                  
+    72 000000BE E83D000000                  call open_read
+    73 000000C3 4883F8FF                    cmp rax, -1
+    74 000000C7 742D                        je exit_fail
+    75                                  
+    76 000000C9 488D35(18000000)            lea rsi, [rel input_buf]
+    77 000000D0 8B0D(14000000)              mov ecx, [rel bytes_read]
+    78 000000D6 E8E4000000                  call parse
+    79                                  
+    80 000000DB E808040000                  call pass1
+    81 000000E0 E8BE080000                  call pass2
+    82 000000E5 E8790C0000                  call fixup
+    83                                  
+    84 000000EA E8630D0000                  call write_output
+    85                                  
+    86 000000EF 31C9                        xor ecx, ecx
+    87 000000F1 E8(00000000)                call ExitProcess
+    88                                  
+    89                                  exit_fail:
+    90 000000F6 B901000000                  mov ecx, 1
+    91 000000FB E8(00000000)                call ExitProcess
+    92                                  
+    93                                  ; ── FILE I/O ───────────────────────────────────────────────────────
+    94                                  open_read:
+    95 00000100 4883EC38                    sub rsp, 0x38
+    96 00000104 488D0D(C8260300)            lea rcx, [rel input_fn_buf]
+    97 0000010B BA00000080                  mov edx, 0x80000000       ; GENERIC_READ
+    98 00000110 41B801000000                mov r8d, 1                ; FILE_SHARE_READ
+    99 00000116 4531C9                      xor r9d, r9d              ; lpSecurityAttributes = NULL
+   100 00000119 C744242003000000            mov dword [rsp+0x20], 3   ; OPEN_EXISTING
+   101 00000121 48C744242800000000          mov qword [rsp+0x28], 0   ; dwFlagsAndAttributes
+   102 0000012A 48C744243000000000          mov qword [rsp+0x30], 0   ; hTemplateFile
+   103 00000133 E8(00000000)                call CreateFileA
+   104 00000138 4883F8FF                    cmp rax, -1
+   105 0000013C 743B                        je .fail
+   106 0000013E 4989C4                      mov r12, rax              ; save handle
+   107                                  
+   108 00000141 4C89E1                      mov rcx, r12
+   109 00000144 488D15(18000000)            lea rdx, [rel input_buf]
+   110 0000014B 41B800400000                mov r8d, 16384
+   111 00000151 4C8D0D(14000000)            lea r9, [rel bytes_read]
+   112 00000158 48C744242000000000          mov qword [rsp+0x20], 0   ; lpOverlapped = NULL
+   113 00000161 E8(00000000)                call ReadFile
+   114 00000166 85C0                        test eax, eax
+   115 00000168 740F                        jz .fail
+   116                                  
+   117 0000016A 4C89E1                      mov rcx, r12
+   118 0000016D E8(00000000)                call CloseHandle
+   119 00000172 31C0                        xor eax, eax
+   120 00000174 4883C438                    add rsp, 0x38
+   121 00000178 C3                          ret
+   122                                  .fail:
+   123 00000179 48C7C0FFFFFFFF              mov rax, -1
+   124 00000180 4883C438                    add rsp, 0x38
+   125 00000184 C3                          ret
+   126                                  
+   127                                  open_write:
+   128 00000185 4883EC38                    sub rsp, 0x38
+   129 00000189 488D0D(21400000)            lea rcx, [rel output_fn]
+   130 00000190 BA00000040                  mov edx, 0x40000000       ; GENERIC_WRITE
+   131 00000195 4531C0                      xor r8d, r8d              ; no share
+   132 00000198 4531C9                      xor r9d, r9d              ; NULL
+   133 0000019B C744242002000000            mov dword [rsp+0x20], 2   ; CREATE_ALWAYS
+   134 000001A3 48C744242800000000          mov qword [rsp+0x28], 0   ; dwFlagsAndAttributes
+   135 000001AC 48C744243000000000          mov qword [rsp+0x30], 0   ; hTemplateFile
+   136 000001B5 E8(00000000)                call CreateFileA
+   137 000001BA 4883C438                    add rsp, 0x38
+   138 000001BE C3                          ret
+   139                                  
+   140                                  
+   141                                  
+   142                                  ; ── PARSER ─────────────────────────────────────────────────────────
+   143                                  ; Parse: each non-comment, non-empty line has "XX YY [ZZ ...args]"
+   144                                  ; Comments start with ';' or '#'. Lines separated by \n.
+   145                                  ; Stores into inst_buf at [count*26] = first 3 bytes (XX, YY, ZZ), rest 0.
+   146                                  
+   147                                  parse:
+   148 000001BF 53                          push rbx
+   149 000001C0 4154                        push r12
+   150 000001C2 4155                        push r13
+   151 000001C4 4156                        push r14
+   152 000001C6 4157                        push r15
+   153                                  
+   154 000001C8 488D1D(00080000)            lea rbx, [rel inst_buf]
+   155 000001CF 4531F6                      xor r14d, r14d
+   156                                  
+   157                                      ; rsi = start of input, ecx = bytes_read (set by caller)
+   158 000001D2 4C8D140E                    lea r10, [rsi+rcx]
+   159 000001D6 90                          nop
+   160                                  
+   161                                  .next_line:
+   162 000001D7 4C39D6                      cmp rsi, r10
+   163 000001DA 0F83DB010000                jae .done
+   164                                  
+   165                                      ; Skip whitespace
+   166                                  .skip_ws:
+   167 000001E0 4C39D6                      cmp rsi, r10
+   168 000001E3 0F83D2010000                jae .done
+   169 000001E9 0FB606                      movzx eax, byte [rsi]
+   170 000001EC 3C20                        cmp al, ' '
+   171 000001EE 740E                        je .skip1
+   172 000001F0 3C09                        cmp al, 9
+   173 000001F2 740A                        je .skip1
+   174 000001F4 3C0A                        cmp al, 10
+   175 000001F6 7406                        je .skip1
+   176 000001F8 3C0D                        cmp al, 13
+   177 000001FA 7402                        je .skip1
+   178 000001FC EB05                        jmp .not_ws
+   179                                  .skip1:
+   180 000001FE 48FFC6                      inc rsi
+   181 00000201 EBDD                        jmp .skip_ws
+   182                                  .not_ws:
+   183                                  
+   184 00000203 4C39D6                      cmp rsi, r10
+   185 00000206 0F83AF010000                jae .done
+   186                                  
+   187                                      ; Comment check
+   188 0000020C 0FB606                      movzx eax, byte [rsi]
+   189 0000020F 3C3B                        cmp al, ';'
+   190 00000211 0F848B010000                je .skip_line
+   191 00000217 3C23                        cmp al, '#'
+   192 00000219 0F8483010000                je .skip_line
+   193                                  
+   194                                      ; Read 3 hex bytes inline (handles 0-9, a-f, A-F)
+   195                                  ; Use R12B for accumulating first nibble, R13B for combined value
+   196 0000021F 4531E4                      xor r12d, r12d
+   197 00000222 0FB606                      movzx eax, byte [rsi]
+   198 00000225 E8A9010000                  call .hex_to_nibble
+   199 0000022A 4188C4                      mov r12b, al
+   200 0000022D 41C0E404                    shl r12b, 4
+   201 00000231 48FFC6                      inc rsi
+   202 00000234 0FB606                      movzx eax, byte [rsi]
+   203 00000237 E897010000                  call .hex_to_nibble
+   204 0000023C 4108C4                      or r12b, al
+   205 0000023F 48FFC6                      inc rsi
+   206 00000242 803E20                      cmp byte [rsi], ' '
+   207 00000245 0F8557010000                jne .skip_line
+   208 0000024B 48FFC6                      inc rsi
+   209                                  
+   210 0000024E 4531ED                      xor r13d, r13d
+   211 00000251 0FB606                      movzx eax, byte [rsi]
+   212 00000254 E87A010000                  call .hex_to_nibble
+   213 00000259 4188C5                      mov r13b, al
+   214 0000025C 41C0E504                    shl r13b, 4
+   215 00000260 48FFC6                      inc rsi
+   216 00000263 0FB606                      movzx eax, byte [rsi]
+   217 00000266 E868010000                  call .hex_to_nibble
+   218 0000026B 4108C5                      or r13b, al
+   219 0000026E 48FFC6                      inc rsi
+   220 00000271 803E20                      cmp byte [rsi], ' '
+   221 00000274 0F8528010000                jne .skip_line
+   222 0000027A 48FFC6                      inc rsi
+   223                                  
+   224 0000027D 4531E4                      xor r12d, r12d
+   225 00000280 0FB606                      movzx eax, byte [rsi]
+   226 00000283 E84B010000                  call .hex_to_nibble
+   227 00000288 4188C4                      mov r12b, al
+   228 0000028B 41C0E404                    shl r12b, 4
+   229 0000028F 48FFC6                      inc rsi
+   230 00000292 0FB606                      movzx eax, byte [rsi]
+   231 00000295 E839010000                  call .hex_to_nibble
+   232 0000029A 4108C4                      or r12b, al
+   233 0000029D 48FFC6                      inc rsi
+   234                                      ; R12B = opcode
+   235                                  
+   236                                      ; Store opcode at inst_buf[r14*26]
+   237 000002A0 51                          push rcx
+   238 000002A1 416BCE1A                    imul ecx, r14d, 26
+   239 000002A5 4488240B                    mov byte [rbx+rcx], r12b
+   240 000002A9 59                          pop rcx
+   241                                  
+   242                                      ; === Parse remaining args on this line ===
+   243 000002AA 51                          push rcx                 ; save bytes_read
+   244 000002AB 57                          push rdi                 ; save rdi
+   245                                  
+   246                                  .arg_loop:
+   247 000002AC 4C39D6                      cmp rsi, r10            ; bounds check before every read
+   248 000002AF 0F83B7000000                jae .args_done
+   249 000002B5 0FB606                      movzx eax, byte [rsi]
+   250 000002B8 3C0A                        cmp al, 10
+   251 000002BA 0F84AC000000                je .args_done
+   252 000002C0 3C0D                        cmp al, 13
+   253 000002C2 0F84A4000000                je .args_done
+   254 000002C8 3C3B                        cmp al, ';'
+   255 000002CA 0F849C000000                je .args_done
+   256 000002D0 3C23                        cmp al, '#'
+   257 000002D2 0F8494000000                je .args_done
+   258 000002D8 3C00                        cmp al, 0
+   259 000002DA 0F848C000000                je .args_done
+   260 000002E0 3C20                        cmp al, ' '
+   261 000002E2 7505                        jne .arg_tok
+   262 000002E4 48FFC6                      inc rsi
+   263 000002E7 EBC3                        jmp .arg_loop
+   264                                  
+   265                                  .arg_tok:
+   266                                      ; (No special 's' handling — strings are not supported in v0.2 scope)
+   267                                  
+   268                                  .arg_hex:
+   269                                      ; Parse 2 hex chars into al (inline, copies pattern from .hex_to_nibble)
+   270 000002E9 31FF                        xor edi, edi            ; edi = char counter
+   271 000002EB 31C0                        xor eax, eax            ; eax = result byte
+   272                                  .arg_hex_l:
+   273 000002ED 4C39D6                      cmp rsi, r10            ; bounds check
+   274 000002F0 7340                        jae .arg_hex_d
+   275 000002F2 0FB60E                      movzx ecx, byte [rsi]
+   276 000002F5 80F930                      cmp cl, '0'
+   277 000002F8 7238                        jb .arg_hex_d
+   278 000002FA 80F939                      cmp cl, '9'
+   279 000002FD 7619                        jbe .arg_hex_n
+   280 000002FF 80F941                      cmp cl, 'A'
+   281 00000302 722E                        jb .arg_hex_d
+   282 00000304 80F946                      cmp cl, 'F'
+   283 00000307 7614                        jbe .arg_hex_h
+   284 00000309 80F961                      cmp cl, 'a'
+   285 0000030C 7224                        jb .arg_hex_d
+   286 0000030E 80F966                      cmp cl, 'f'
+   287 00000311 771F                        ja .arg_hex_d
+   288 00000313 80E957                      sub cl, 'a'-10
+   289 00000316 EB08                        jmp .arg_hex_a
+   290                                  .arg_hex_n:
+   291 00000318 80E930                      sub cl, '0'
+   292 0000031B EB03                        jmp .arg_hex_a
+   293                                  .arg_hex_h:
+   294 0000031D 80E937                      sub cl, 'A'-10
+   295                                  .arg_hex_a:
+   296 00000320 C1E004                      shl eax, 4
+   297 00000323 0FB6D1                      movzx edx, cl
+   298 00000326 09D0                        or eax, edx
+   299 00000328 FFC7                        inc edi
+   300 0000032A 48FFC6                      inc rsi
+   301 0000032D 83FF02                      cmp edi, 2
+   302 00000330 72BB                        jb .arg_hex_l
+   303                                  .arg_hex_d:
+   304 00000332 85FF                        test edi, edi
+   305 00000334 7436                        jz .args_done
+   306                                      ; Store al at inst_buf[r14*26 + 1 + arg_count]
+   307                                      ; CAREFUL: don't load arg_count into eax (overwrites al = parsed byte!)
+   308 00000336 51                          push rcx
+   309 00000337 50                          push rax
+   310 00000338 52                          push rdx
+   311                                      ; Read arg_count into a safe register (r8b)
+   312 00000339 488D15(1C280300)            lea rdx, [rel arg_count]
+   313 00000340 440FB602                    movzx r8d, byte [rdx]   ; r8b = current arg_count
+   314 00000344 4183F818                    cmp r8d, 24
+   315 00000348 7D1A                        jge .skip_arg_store
+   316                                      ; Compute target: rbx + r14*26 + 1 + r8b
+   317 0000034A 4489F2                      mov edx, r14d
+   318 0000034D 6BD21A                      imul edx, 26
+   319 00000350 83C201                      add edx, 1
+   320 00000353 4401C2                      add edx, r8d
+   321 00000356 4801DA                      add rdx, rbx            ; rdx = inst_buf + offset
+   322                                      ; al has the parsed byte (DO NOT overwrite!)
+   323 00000359 8802                        mov byte [rdx], al
+   324                                      ; Increment arg_count
+   325 0000035B 488D15(1C280300)            lea rdx, [rel arg_count]
+   326 00000362 FE02                        inc byte [rdx]
+   327                                  .skip_arg_store:
+   328 00000364 5A                          pop rdx
+   329 00000365 58                          pop rax
+   330 00000366 59                          pop rcx
+   331 00000367 E940FFFFFF                  jmp .arg_loop
+   332                                  
+   333                                  .args_done:
+   334 0000036C 5F                          pop rdi
+   335 0000036D 59                          pop rcx
+   336                                      ; Reset arg_count for next instruction
+   337 0000036E 50                          push rax
+   338 0000036F 31C0                        xor eax, eax
+   339 00000371 488D15(1C280300)            lea rdx, [rel arg_count]
+   340 00000378 8802                        mov byte [rdx], al
+   341 0000037A 58                          pop rax
+   342 0000037B 41FFC6                      inc r14d
+   343                                  
+   344 0000037E 4181FEFF000000              cmp r14d, 255
+   345 00000385 7334                        jae .done
+   346 00000387 EB19                        jmp .skip_line
+   347                                  
+   348                                  .op_skip_line:
+   349                                      ; For 0x12 (string def), skip directly to end of line
+   350                                      ; First store the opcode
+   351 00000389 51                          push rcx
+   352 0000038A 416BCE1A                    imul ecx, r14d, 26
+   353 0000038E 4488240B                    mov byte [rbx+rcx], r12b
+   354 00000392 59                          pop rcx
+   355 00000393 41FFC6                      inc r14d
+   356 00000396 4181FEFF000000              cmp r14d, 255
+   357 0000039D 731C                        jae .done
+   358 0000039F 90                          nop
+   359 000003A0 EB00                        jmp .skip_line
+   360                                  
+   361                                  .skip_line:
+   362 000003A2 4C39D6                      cmp rsi, r10
+   363 000003A5 7314                        jae .done
+   364 000003A7 0FB606                      movzx eax, byte [rsi]
+   365 000003AA 3C0A                        cmp al, 10
+   366 000003AC 7405                        je .nl
+   367 000003AE 48FFC6                      inc rsi
+   368 000003B1 EBEF                        jmp .skip_line
+   369                                  .nl:
+   370 000003B3 48FFC6                      inc rsi
+   371 000003B6 E91CFEFFFF                  jmp .next_line
+   372                                  
+   373                                  .done:
+   374 000003BB 448935(04000000)            mov [rel inst_count], r14d
+   375 000003C2 4C8935(C0260300)            mov [rel parse_debug], r14
+   376 000003C9 415F                        pop r15
+   377 000003CB 415E                        pop r14
+   378 000003CD 415D                        pop r13
+   379 000003CF 415C                        pop r12
+   380 000003D1 5B                          pop rbx
+   381 000003D2 C3                          ret
+   382                                  
+   383                                  .hex_to_nibble:
+   384                                      ; AL = ASCII char. Returns value 0-15 in AL.
+   385 000003D3 3C39                        cmp al, '9'
+   386 000003D5 7613                        jbe .digit
+   387 000003D7 3C41                        cmp al, 'A'
+   388 000003D9 7215                        jb .bad_hex
+   389 000003DB 3C46                        cmp al, 'F'
+   390 000003DD 760E                        jbe .uc
+   391 000003DF 3C61                        cmp al, 'a'
+   392 000003E1 720D                        jb .bad_hex
+   393 000003E3 3C66                        cmp al, 'f'
+   394 000003E5 7709                        ja .bad_hex
+   395 000003E7 2C57                        sub al, 'a'-10
+   396 000003E9 C3                          ret
+   397                                  .digit:
+   398 000003EA 2C30                        sub al, '0'
+   399 000003EC C3                          ret
+   400                                  .uc:
+   401 000003ED 2C37                        sub al, 'A'-10
+   402 000003EF C3                          ret
+   403                                  .bad_hex:
+   404 000003F0 B000                        mov al, 0
+   405 000003F2 C3                          ret
+   406                                  
+   407                                  skip_to_content:
+   408 000003F3 4C39D6                      cmp rsi, r10
+   409 000003F6 7D1C                        jge .ret
+   410                                  .l:
+   411 000003F8 0FB606                      movzx eax, byte [rsi]
+   412 000003FB 3C20                        cmp al, ' '
+   413 000003FD 740D                        je .n
+   414 000003FF 3C09                        cmp al, 9
+   415 00000401 7409                        je .n
+   416 00000403 3C0A                        cmp al, 10
+   417 00000405 7405                        je .n
+   418 00000407 3C0D                        cmp al, 13
+   419 00000409 7401                        je .n
+   420 0000040B C3                          ret
+   421                                  .n:
+   422 0000040C 48FFC6                      inc rsi
+   423 0000040F 4C39D6                      cmp rsi, r10
+   424 00000412 7CE4                        jl .l
+   425                                  .ret:
+   426 00000414 C3                          ret
+   427                                  
+   428                                  skip_spc:
+   429 00000415 4C39D6                      cmp rsi, r10
+   430 00000418 7D0F                        jge .ret
+   431                                  .l:
+   432 0000041A 0FB606                      movzx eax, byte [rsi]
+   433 0000041D 3C20                        cmp al, ' '
+   434 0000041F 7508                        jne .ret
+   435 00000421 48FFC6                      inc rsi
+   436 00000424 4C39D6                      cmp rsi, r10
+   437 00000427 7CF1                        jl .l
+   438                                  .ret:
+   439 00000429 C3                          ret
+   440                                  
+   441                                  skip_to_eol:
+   442 0000042A 4C39D6                      cmp rsi, r10
+   443 0000042D 7D0F                        jge .ret
+   444                                  .l:
+   445 0000042F 0FB606                      movzx eax, byte [rsi]
+   446 00000432 3C0A                        cmp al, 10
+   447 00000434 7408                        je .ret
+   448 00000436 48FFC6                      inc rsi
+   449 00000439 4C39D6                      cmp rsi, r10
+   450 0000043C 7CF1                        jl .l
+   451                                  .ret:
+   452 0000043E C3                          ret
+   453                                  
+   454                                  parse_byte:
+   455 0000043F 31C0                        xor eax, eax
+   456 00000441 31C9                        xor ecx, ecx
+   457                                  .l:
+   458 00000443 4C39D6                      cmp rsi, r10
+   459 00000446 7D3D                        jge .d
+   460 00000448 0FB616                      movzx edx, byte [rsi]
+   461 0000044B 80FA30                      cmp dl, '0'
+   462 0000044E 7235                        jb .d
+   463 00000450 80FA39                      cmp dl, '9'
+   464 00000453 7619                        jbe .n
+   465 00000455 80FA41                      cmp dl, 'A'
+   466 00000458 722B                        jb .d
+   467 0000045A 80FA46                      cmp dl, 'F'
+   468 0000045D 7614                        jbe .h
+   469 0000045F 80FA61                      cmp dl, 'a'
+   470 00000462 7221                        jb .d
+   471 00000464 80FA66                      cmp dl, 'f'
+   472 00000467 771C                        ja .d
+   473 00000469 80EA57                      sub dl, 'a'-10
+   474 0000046C EB08                        jmp .a
+   475                                  .n:
+   476 0000046E 80EA30                      sub dl, '0'
+   477 00000471 EB03                        jmp .a
+   478                                  .h:
+   479 00000473 80EA37                      sub dl, 'A'-10
+   480                                  .a:
+   481 00000476 C1E004                      shl eax, 4
+   482 00000479 09D0                        or eax, edx
+   483 0000047B FFC1                        inc ecx
+   484 0000047D 48FFC6                      inc rsi
+   485 00000480 83F902                      cmp ecx, 2
+   486 00000483 72BE                        jb .l
+   487                                  .d:
+   488 00000485 85C9                        test ecx, ecx
+   489 00000487 7505                        jnz .ok
+   490 00000489 B8FFFFFFFF                  mov eax, -1
+   491                                  .ok:
+   492 0000048E C3                          ret
+   493                                  
+   494                                  parse_u64:
+   495 0000048F 4831D2                      xor rdx, rdx
+   496 00000492 31C9                        xor ecx, ecx
+   497                                  .l:
+   498 00000494 4C39D6                      cmp rsi, r10
+   499 00000497 7D49                        jge .d
+   500 00000499 440FB61E                    movzx r11d, byte [rsi]
+   501 0000049D 4180FB30                    cmp r11b, '0'
+   502 000004A1 723F                        jb .d
+   503 000004A3 4180FB39                    cmp r11b, '9'
+   504 000004A7 761E                        jbe .n
+   505 000004A9 4180FB41                    cmp r11b, 'A'
+   506 000004AD 7233                        jb .d
+   507 000004AF 4180FB46                    cmp r11b, 'F'
+   508 000004B3 7618                        jbe .h
+   509 000004B5 4180FB61                    cmp r11b, 'a'
+   510 000004B9 7227                        jb .d
+   511 000004BB 4180FB66                    cmp r11b, 'f'
+   512 000004BF 7721                        ja .d
+   513 000004C1 4180EB57                    sub r11b, 'a'-10
+   514 000004C5 EB0A                        jmp .a
+   515                                  .n:
+   516 000004C7 4180EB30                    sub r11b, '0'
+   517 000004CB EB04                        jmp .a
+   518                                  .h:
+   519 000004CD 4180EB37                    sub r11b, 'A'-10
+   520                                  .a:
+   521 000004D1 48C1E204                    shl rdx, 4
+   522 000004D5 4C09DA                      or rdx, r11
+   523 000004D8 FFC1                        inc ecx
+   524 000004DA 48FFC6                      inc rsi
+   525 000004DD 83F910                      cmp ecx, 16
+   526 000004E0 72B2                        jb .l
+   527                                  .d:
+   528 000004E2 85C9                        test ecx, ecx
+   529 000004E4 0F95C0                      setnz al
+   530 000004E7 C3                          ret
+   531                                  
+   532                                  ; ── PASS 1 ─────────────────────────────────────────────────────────
+   533                                  pass1:
+   534 000004E8 4154                        push r12
+   535 000004EA 4155                        push r13
+   536 000004EC 4156                        push r14
+   537 000004EE 4531E4                      xor r12d, r12d
+   538 000004F1 4531ED                      xor r13d, r13d
+   539 000004F4 448B35(04000000)            mov r14d, [rel inst_count]
+   540 000004FB 488D3D(00220000)            lea rdi, [rel handler_off]
+   541 00000502 31C0                        xor eax, eax
+   542 00000504 B900010000                  mov ecx, 256
+   543 00000509 F3AB                        rep stosd
+   544 0000050B C705(00000000)0000-         mov dword [rel fixup_cnt], 0
+   544 00000513 0000               
+   545                                  
+   546                                  .loop:
+   547 00000515 4539F5                      cmp r13d, r14d
+   548 00000518 0F8DD6000000                jge .done
+   549 0000051E 488D1D(00080000)            lea rbx, [rel inst_buf]
+   550 00000525 416BC51A                    imul eax, r13d, 26
+   551 00000529 4801C3                      add rbx, rax
+   552 0000052C 0FB60B                      movzx ecx, byte [rbx]
+   553 0000052F 4C8B4301                    mov r8, [rbx+1]
+   554 00000533 4C8B4B09                    mov r9, [rbx+9]
+   555 00000537 4C8B5B11                    mov r11, [rbx+17]
+   556 0000053B 80F940                      cmp cl, 0x40
+   557 0000053E 7449                        je .hdlr
+   558 00000540 E8BD000000                  call calc_size
+   559 00000545 884319                      mov byte [rbx+25], al
+   560 00000548 4101C4                      add r12d, eax
+   561 0000054B 80F941                      cmp cl, 0x41
+   562 0000054E 7446                        je .fix5
+   563 00000550 80F970                      cmp cl, 0x70
+   564 00000553 7441                        je .fix5
+   565 00000555 80F971                      cmp cl, 0x71
+   566 00000558 7468                        je .fix6
+   567 0000055A 80F972                      cmp cl, 0x72
+   568 0000055D 7463                        je .fix6
+   569 0000055F 80F973                      cmp cl, 0x73
+   570 00000562 745E                        je .fix6
+   571 00000564 80F974                      cmp cl, 0x74
+   572 00000567 7459                        je .fix6
+   573 00000569 80F975                      cmp cl, 0x75
+   574 0000056C 7454                        je .fix6
+   575 0000056E 80F976                      cmp cl, 0x76
+   576 00000571 744F                        je .fix6
+   577 00000573 80F977                      cmp cl, 0x77
+   578 00000576 744A                        je .fix6
+   579 00000578 80F978                      cmp cl, 0x78
+   580 0000057B 7445                        je .fix6
+   581 0000057D 80F979                      cmp cl, 0x79
+   582 00000580 7440                        je .fix6
+   583 00000582 80F97A                      cmp cl, 0x7A
+   584 00000585 743B                        je .fix6
+   585 00000587 EB63                        jmp .next
+   586                                  
+   587                                  .hdlr:
+   588 00000589 488D3D(00220000)            lea rdi, [rel handler_off]
+   589 00000590 46892487                    mov [rdi+r8*4], r12d
+   590 00000594 EB56                        jmp .next
+   591                                  
+   592                                  .fix5:
+   593 00000596 8B3D(00000000)              mov edi, [rel fixup_cnt]
+   594 0000059C 83FF3F                      cmp edi, 63
+   595 0000059F 7F4B                        jg .next
+   596 000005A1 4C8D15(00260000)            lea r10, [rel fixup_buf]
+   597 000005A8 6BFF03                      imul edi, 3
+   598 000005AB 45882C3A                    mov [r10+rdi], r13b
+   599 000005AF 4588443A01                  mov [r10+rdi+1], r8b
+   600 000005B4 41C6443A0200                mov byte [r10+rdi+2], 0
+   601 000005BA FF05(00000000)              inc dword [rel fixup_cnt]
+   602 000005C0 EB2A                        jmp .next
+   603                                  
+   604                                  .fix6:
+   605 000005C2 8B3D(00000000)              mov edi, [rel fixup_cnt]
+   606 000005C8 83FF3F                      cmp edi, 63
+   607 000005CB 7F1F                        jg .next
+   608 000005CD 4C8D15(00260000)            lea r10, [rel fixup_buf]
+   609 000005D4 6BFF03                      imul edi, 3
+   610 000005D7 45882C3A                    mov [r10+rdi], r13b
+   611 000005DB 4588443A01                  mov [r10+rdi+1], r8b
+   612 000005E0 41C6443A0201                mov byte [r10+rdi+2], 1
+   613 000005E6 FF05(00000000)              inc dword [rel fixup_cnt]
+   614                                  
+   615                                  .next:
+   616 000005EC 41FFC5                      inc r13d
+   617 000005EF E921FFFFFF                  jmp .loop
+   618                                  
+   619                                  .done:
+   620 000005F4 448925(08000000)            mov [rel emitted_size], r12d
+   621 000005FB 415E                        pop r14
+   622 000005FD 415D                        pop r13
+   623 000005FF 415C                        pop r12
+   624 00000601 C3                          ret
+   625                                  
+   626                                  calc_size:
+   627 00000602 80F930                      cmp cl, 0x30
+   628 00000605 0F84DB000000                je .s_set
+   629 0000060B 80F960                      cmp cl, 0x60
+   630 0000060E 0F84E9000000                je .s_get
+   631 00000614 80F961                      cmp cl, 0x61
+   632 00000617 0F8450010000                je .s_addsub
+   633 0000061D 80F962                      cmp cl, 0x62
+   634 00000620 0F8447010000                je .s_addsub
+   635 00000626 80F965                      cmp cl, 0x65
+   636 00000629 0F84F9000000                je .s_cmp
+   637 0000062F 80F966                      cmp cl, 0x66
+   638 00000632 0F841E010000                je .s_incdec
+   639 00000638 80F967                      cmp cl, 0x67
+   640 0000063B 0F8415010000                je .s_incdec
+   641 00000641 80F968                      cmp cl, 0x68
+   642 00000644 0F8463010000                je .s_arith3
+   643 0000064A 80F969                      cmp cl, 0x69
+   644 0000064D 0F845A010000                je .s_arith3
+   645 00000653 80F963                      cmp cl, 0x63
+   646 00000656 0F8451010000                je .s_arith3
+   647 0000065C 80F980                      cmp cl, 0x80
+   648 0000065F 0F8489010000                je .s_ldb
+   649 00000665 80F9A0                      cmp cl, 0xA0
+   650 00000668 0F84AE010000                je .s_1
+   651 0000066E 80F9FF                      cmp cl, 0xFF
+   652 00000671 0F84A5010000                je .s_1
+   653 00000677 80F941                      cmp cl, 0x41
+   654 0000067A 0F84A2010000                je .s_5
+   655 00000680 80F970                      cmp cl, 0x70
+   656 00000683 0F8499010000                je .s_5
+   657 00000689 80F971                      cmp cl, 0x71
+   658 0000068C 0F8496010000                je .s_6
+   659 00000692 80F972                      cmp cl, 0x72
+   660 00000695 0F848D010000                je .s_6
+   661 0000069B 80F973                      cmp cl, 0x73
+   662 0000069E 0F8484010000                je .s_6
+   663 000006A4 80F974                      cmp cl, 0x74
+   664 000006A7 0F847B010000                je .s_6
+   665 000006AD 80F975                      cmp cl, 0x75
+   666 000006B0 0F8472010000                je .s_6
+   667 000006B6 80F976                      cmp cl, 0x76
+   668 000006B9 0F8469010000                je .s_6
+   669 000006BF 80F977                      cmp cl, 0x77
+   670 000006C2 0F8460010000                je .s_6
+   671 000006C8 80F978                      cmp cl, 0x78
+   672 000006CB 0F8457010000                je .s_6
+   673 000006D1 80F979                      cmp cl, 0x79
+   674 000006D4 0F844E010000                je .s_6
+   675 000006DA 80F97A                      cmp cl, 0x7A
+   676 000006DD 0F8445010000                je .s_6
+   677 000006E3 31C0                        xor eax, eax
+   678 000006E5 C3                          ret
+   679                                  
+   680                                  .s_set:
+   681 000006E6 4489C0                      mov eax, r8d
+   682 000006E9 C1E003                      shl eax, 3
+   683 000006EC 83F87F                      cmp eax, 127
+   684 000006EF 7706                        ja .ss32
+   685 000006F1 B80E000000                  mov eax, 14
+   686 000006F6 C3                          ret
+   687                                  .ss32:
+   688 000006F7 B811000000                  mov eax, 17
+   689 000006FC C3                          ret
+   690                                  
+   691                                  .s_get:
+   692 000006FD 4489C0                      mov eax, r8d
+   693 00000700 C1E003                      shl eax, 3
+   694 00000703 4489C9                      mov ecx, r9d
+   695 00000706 C1E103                      shl ecx, 3
+   696 00000709 31D2                        xor edx, edx
+   697 0000070B 83F87F                      cmp eax, 127
+   698 0000070E 7705                        ja .g1b
+   699 00000710 83C204                      add edx, 4
+   700 00000713 EB03                        jmp .g2
+   701                                  .g1b:
+   702 00000715 83C207                      add edx, 7
+   703                                  .g2:
+   704 00000718 83F97F                      cmp ecx, 127
+   705 0000071B 7705                        ja .g2b
+   706 0000071D 83C204                      add edx, 4
+   707 00000720 EB03                        jmp .g_ret
+   708                                  .g2b:
+   709 00000722 83C207                      add edx, 7
+   710                                  .g_ret:
+   711 00000725 89D0                        mov eax, edx
+   712 00000727 C3                          ret
+   713                                  
+   714                                  .s_cmp:
+   715 00000728 4489C0                      mov eax, r8d
+   716 0000072B C1E003                      shl eax, 3
+   717 0000072E 4489C9                      mov ecx, r9d
+   718 00000731 C1E103                      shl ecx, 3
+   719 00000734 31D2                        xor edx, edx
+   720 00000736 83F87F                      cmp eax, 127
+   721 00000739 7705                        ja .c1b
+   722 0000073B 83C204                      add edx, 4
+   723 0000073E EB03                        jmp .c2
+   724                                  .c1b:
+   725 00000740 83C207                      add edx, 7
+   726                                  .c2:
+   727 00000743 83F97F                      cmp ecx, 127
+   728 00000746 7705                        ja .c2b
+   729 00000748 83C204                      add edx, 4
+   730 0000074B EB03                        jmp .c3
+   731                                  .c2b:
+   732 0000074D 83C207                      add edx, 7
+   733                                  .c3:
+   734 00000750 83C203                      add edx, 3
+   735 00000753 89D0                        mov eax, edx
+   736 00000755 C3                          ret
+   737                                  
+   738                                  .s_incdec:
+   739 00000756 4489C0                      mov eax, r8d
+   740 00000759 C1E003                      shl eax, 3
+   741 0000075C 83F87F                      cmp eax, 127
+   742 0000075F 7706                        ja .idb
+   743 00000761 B80C000000                  mov eax, 12
+   744 00000766 C3                          ret
+   745                                  .idb:
+   746 00000767 B812000000                  mov eax, 18
+   747 0000076C C3                          ret
+   748                                  
+   749                                  .s_addsub:
+   750 0000076D 4489C0                      mov eax, r8d
+   751 00000770 C1E003                      shl eax, 3
+   752 00000773 31D2                        xor edx, edx
+   753 00000775 83F87F                      cmp eax, 127
+   754 00000778 7705                        ja .asl
+   755 0000077A 83C204                      add edx, 4
+   756 0000077D EB03                        jmp .asm
+   757                                  .asl:
+   758 0000077F 83C207                      add edx, 7
+   759                                  .asm:
+   760 00000782 4489C8                      mov eax, r9d
+   761 00000785 83F880                      cmp eax, -128
+   762 00000788 7C0A                        jl .as32
+   763 0000078A 83F87F                      cmp eax, 127
+   764 0000078D 7F05                        jg .as32
+   765 0000078F 83C204                      add edx, 4
+   766 00000792 EB03                        jmp .asst
+   767                                  .as32:
+   768 00000794 83C207                      add edx, 7
+   769                                  .asst:
+   770 00000797 4489C0                      mov eax, r8d
+   771 0000079A C1E003                      shl eax, 3
+   772 0000079D 83F87F                      cmp eax, 127
+   773 000007A0 7705                        ja .astb
+   774 000007A2 83C204                      add edx, 4
+   775 000007A5 EB03                        jmp .as_ret
+   776                                  .astb:
+   777 000007A7 83C207                      add edx, 7
+   778                                  .as_ret:
+   779 000007AA 89D0                        mov eax, edx
+   780 000007AC C3                          ret
+   781                                  
+   782                                  .s_arith3:
+   783 000007AD 4489C0                      mov eax, r8d
+   784 000007B0 C1E003                      shl eax, 3
+   785 000007B3 4489C9                      mov ecx, r9d
+   786 000007B6 C1E103                      shl ecx, 3
+   787 000007B9 31D2                        xor edx, edx
+   788 000007BB 83F87F                      cmp eax, 127
+   789 000007BE 7705                        ja .a1b
+   790 000007C0 83C204                      add edx, 4
+   791 000007C3 EB03                        jmp .a2
+   792                                  .a1b:
+   793 000007C5 83C207                      add edx, 7
+   794                                  .a2:
+   795 000007C8 83F97F                      cmp ecx, 127
+   796 000007CB 7705                        ja .a2b
+   797 000007CD 83C204                      add edx, 4
+   798 000007D0 EB03                        jmp .a3
+   799                                  .a2b:
+   800 000007D2 83C207                      add edx, 7
+   801                                  .a3:
+   802 000007D5 83C203                      add edx, 3
+   803 000007D8 4489C0                      mov eax, r8d
+   804 000007DB C1E003                      shl eax, 3
+   805 000007DE 83F87F                      cmp eax, 127
+   806 000007E1 7705                        ja .a3b
+   807 000007E3 83C204                      add edx, 4
+   808 000007E6 EB03                        jmp .a_ret
+   809                                  .a3b:
+   810 000007E8 83C207                      add edx, 7
+   811                                  .a_ret:
+   812 000007EB 89D0                        mov eax, edx
+   813 000007ED C3                          ret
+   814                                  
+   815                                  .s_ldb:
+   816 000007EE 4489C8                      mov eax, r9d
+   817 000007F1 C1E003                      shl eax, 3
+   818 000007F4 31D2                        xor edx, edx
+   819 000007F6 83F87F                      cmp eax, 127
+   820 000007F9 7705                        ja .lb1
+   821 000007FB 83C204                      add edx, 4
+   822 000007FE EB03                        jmp .lb2
+   823                                  .lb1:
+   824 00000800 83C207                      add edx, 7
+   825                                  .lb2:
+   826 00000803 83C204                      add edx, 4
+   827 00000806 4489C0                      mov eax, r8d
+   828 00000809 C1E003                      shl eax, 3
+   829 0000080C 83F87F                      cmp eax, 127
+   830 0000080F 7705                        ja .lb2b
+   831 00000811 83C204                      add edx, 4
+   832 00000814 EB03                        jmp .lb_ret
+   833                                  .lb2b:
+   834 00000816 83C207                      add edx, 7
+   835                                  .lb_ret:
+   836 00000819 89D0                        mov eax, edx
+   837 0000081B C3                          ret
+   838                                  
+   839                                  .s_1:
+   840 0000081C B801000000                  mov eax, 1
+   841 00000821 C3                          ret
+   842                                  .s_5:
+   843 00000822 B805000000                  mov eax, 5
+   844 00000827 C3                          ret
+   845                                  .s_6:
+   846 00000828 B806000000                  mov eax, 6
+   847 0000082D C3                          ret
+   848                                  
+   849                                  ; ── X64 EMITTERS ───────────────────────────────────────────────────
+   850                                  emit_movabs_rax:
+   851 0000082E C60748                      mov byte [rdi], 0x48
+   852 00000831 C64701B8                    mov byte [rdi+1], 0xB8
+   853 00000835 48895702                    mov [rdi+2], rdx
+   854 00000839 4883C70A                    add rdi, 10
+   855 0000083D C3                          ret
+   856                                  
+   857                                  emit_store_state:
+   858 0000083E C1E003                      shl eax, 3
+   859 00000841 C60749                      mov byte [rdi], 0x49
+   860 00000844 C6470189                    mov byte [rdi+1], 0x89
+   861 00000848 83F87F                      cmp eax, 127
+   862 0000084B 770C                        ja .es32
+   863 0000084D C6470247                    mov byte [rdi+2], 0x47
+   864 00000851 884703                      mov byte [rdi+3], al
+   865 00000854 4883C704                    add rdi, 4
+   866 00000858 C3                          ret
+   867                                  .es32:
+   868 00000859 C6470287                    mov byte [rdi+2], 0x87
+   869 0000085D 894703                      mov [rdi+3], eax
+   870 00000860 4883C707                    add rdi, 7
+   871 00000864 C3                          ret
+   872                                  
+   873                                  emit_load_rax:
+   874 00000865 C1E003                      shl eax, 3
+   875 00000868 C60749                      mov byte [rdi], 0x49
+   876 0000086B C647018B                    mov byte [rdi+1], 0x8B
+   877 0000086F 83F87F                      cmp eax, 127
+   878 00000872 770C                        ja .el32
+   879 00000874 C6470247                    mov byte [rdi+2], 0x47
+   880 00000878 884703                      mov byte [rdi+3], al
+   881 0000087B 4883C704                    add rdi, 4
+   882 0000087F C3                          ret
+   883                                  .el32:
+   884 00000880 C6470287                    mov byte [rdi+2], 0x87
+   885 00000884 894703                      mov [rdi+3], eax
+   886 00000887 4883C707                    add rdi, 7
+   887 0000088B C3                          ret
+   888                                  
+   889                                  emit_load_rdx:
+   890 0000088C C1E003                      shl eax, 3
+   891 0000088F C60749                      mov byte [rdi], 0x49
+   892 00000892 C647018B                    mov byte [rdi+1], 0x8B
+   893 00000896 83F87F                      cmp eax, 127
+   894 00000899 770C                        ja .elr32
+   895 0000089B C6470257                    mov byte [rdi+2], 0x57
+   896 0000089F 884703                      mov byte [rdi+3], al
+   897 000008A2 4883C704                    add rdi, 4
+   898 000008A6 C3                          ret
+   899                                  .elr32:
+   900 000008A7 C6470297                    mov byte [rdi+2], 0x97
+   901 000008AB 894703                      mov [rdi+3], eax
+   902 000008AE 4883C707                    add rdi, 7
+   903 000008B2 C3                          ret
+   904                                  
+   905                                  emit_add_imm:
+   906 000008B3 83FA80                      cmp edx, -128
+   907 000008B6 7C18                        jl .eai32
+   908 000008B8 83FA7F                      cmp edx, 127
+   909 000008BB 7F13                        jg .eai32
+   910 000008BD C60748                      mov byte [rdi], 0x48
+   911 000008C0 C6470183                    mov byte [rdi+1], 0x83
+   912 000008C4 C64702C0                    mov byte [rdi+2], 0xC0
+   913 000008C8 885703                      mov byte [rdi+3], dl
+   914 000008CB 4883C704                    add rdi, 4
+   915 000008CF C3                          ret
+   916                                  .eai32:
+   917 000008D0 C60748                      mov byte [rdi], 0x48
+   918 000008D3 C6470181                    mov byte [rdi+1], 0x81
+   919 000008D7 C64702C0                    mov byte [rdi+2], 0xC0
+   920 000008DB 895703                      mov [rdi+3], edx
+   921 000008DE 4883C707                    add rdi, 7
+   922 000008E2 C3                          ret
+   923                                  
+   924                                  emit_sub_imm:
+   925 000008E3 83FA80                      cmp edx, -128
+   926 000008E6 7C18                        jl .esi32
+   927 000008E8 83FA7F                      cmp edx, 127
+   928 000008EB 7F13                        jg .esi32
+   929 000008ED C60748                      mov byte [rdi], 0x48
+   930 000008F0 C6470183                    mov byte [rdi+1], 0x83
+   931 000008F4 C64702E8                    mov byte [rdi+2], 0xE8
+   932 000008F8 885703                      mov byte [rdi+3], dl
+   933 000008FB 4883C704                    add rdi, 4
+   934 000008FF C3                          ret
+   935                                  .esi32:
+   936 00000900 C60748                      mov byte [rdi], 0x48
+   937 00000903 C6470181                    mov byte [rdi+1], 0x81
+   938 00000907 C64702E8                    mov byte [rdi+2], 0xE8
+   939 0000090B 895703                      mov [rdi+3], edx
+   940 0000090E 4883C707                    add rdi, 7
+   941 00000912 C3                          ret
+   942                                  
+   943                                  emit_cmp_reg:
+   944 00000913 C60748                      mov byte [rdi], 0x48
+   945 00000916 C6470139                    mov byte [rdi+1], 0x39
+   946 0000091A C64702D0                    mov byte [rdi+2], 0xD0
+   947 0000091E 4883C703                    add rdi, 3
+   948 00000922 C3                          ret
+   949                                  
+   950                                  emit_add_reg:
+   951 00000923 C60748                      mov byte [rdi], 0x48
+   952 00000926 C6470101                    mov byte [rdi+1], 0x01
+   953 0000092A C64702D0                    mov byte [rdi+2], 0xD0
+   954 0000092E 4883C703                    add rdi, 3
+   955 00000932 C3                          ret
+   956                                  
+   957                                  emit_sub_reg:
+   958 00000933 C60748                      mov byte [rdi], 0x48
+   959 00000936 C6470129                    mov byte [rdi+1], 0x29
+   960 0000093A C64702D0                    mov byte [rdi+2], 0xD0
+   961 0000093E 4883C703                    add rdi, 3
+   962 00000942 C3                          ret
+   963                                  
+   964                                  emit_mul_reg:
+   965 00000943 C60748                      mov byte [rdi], 0x48
+   966 00000946 C647010F                    mov byte [rdi+1], 0x0F
+   967 0000094A C64702AF                    mov byte [rdi+2], 0xAF
+   968 0000094E C64703C2                    mov byte [rdi+3], 0xC2
+   969 00000952 4883C704                    add rdi, 4
+   970 00000956 C3                          ret
+   971                                  
+   972                                  emit_call_placeholder:
+   973 00000957 C607E8                      mov byte [rdi], 0xE8
+   974 0000095A C7470100000000              mov dword [rdi+1], 0
+   975 00000961 4883C705                    add rdi, 5
+   976 00000965 C3                          ret
+   977                                  
+   978                                  emit_jmp_placeholder:
+   979 00000966 C607E9                      mov byte [rdi], 0xE9
+   980 00000969 C7470100000000              mov dword [rdi+1], 0
+   981 00000970 4883C705                    add rdi, 5
+   982 00000974 C3                          ret
+   983                                  
+   984                                  emit_jcc_placeholder:
+   985 00000975 C6070F                      mov byte [rdi], 0x0F
+   986 00000978 884701                      mov byte [rdi+1], al
+   987 0000097B C7470200000000              mov dword [rdi+2], 0
+   988 00000982 4883C706                    add rdi, 6
+   989 00000986 C3                          ret
+   990                                  
+   991                                  emit_movzx_byte:
+   992 00000987 C6070F                      mov byte [rdi], 0x0F
+   993 0000098A C64701B6                    mov byte [rdi+1], 0xB6
+   994 0000098E C6470242                    mov byte [rdi+2], 0x42
+   995 00000992 44885703                    mov [rdi+3], r10b
+   996 00000996 4883C704                    add rdi, 4
+   997 0000099A C3                          ret
+   998                                  
+   999                                  emit_ret_instr:
+  1000 0000099B C607C3                      mov byte [rdi], 0xC3
+  1001 0000099E 4883C701                    add rdi, 1
+  1002 000009A2 C3                          ret
+  1003                                  
+  1004                                  ; ── PASS 2 ─────────────────────────────────────────────────────────
+  1005                                  pass2:
+  1006 000009A3 4154                        push r12
+  1007 000009A5 4155                        push r13
+  1008 000009A7 4156                        push r14
+  1009                                  
+  1010 000009A9 488D3D(C0260000)            lea rdi, [rel output_buf]
+  1011                                      ; sub rsp, 0x200 (allocate 512B stack state buffer)
+  1012 000009B0 C60748                      mov byte [rdi], 0x48
+  1013 000009B3 C6470181                    mov byte [rdi+1], 0x81
+  1014 000009B7 C64702EC                    mov byte [rdi+2], 0xEC
+  1015 000009BB C7470300020000              mov dword [rdi+3], 0x00000200
+  1016 000009C2 4883C707                    add rdi, 7
+  1017                                      ; mov r15, rsp (r15 = state buffer base)
+  1018 000009C6 C6074C                      mov byte [rdi], 0x4C
+  1019 000009C9 C647018B                    mov byte [rdi+1], 0x8B
+  1020 000009CD C64702FC                    mov byte [rdi+2], 0xFC
+  1021 000009D1 4883C703                    add rdi, 3
+  1022                                      ; call H_00 (displacement fixup patched later)
+  1023 000009D5 C607E8                      mov byte [rdi], 0xE8
+  1024 000009D8 C7470100000000              mov dword [rdi+1], 0
+  1025 000009DF 4883C705                    add rdi, 5
+  1026                                      ; add rsp, 0x200 (restore stack)
+  1027 000009E3 C60748                      mov byte [rdi], 0x48
+  1028 000009E6 C6470181                    mov byte [rdi+1], 0x81
+  1029 000009EA C64702C4                    mov byte [rdi+2], 0xC4
+  1030 000009EE C7470300020000              mov dword [rdi+3], 0x00000200
+  1031 000009F5 4883C707                    add rdi, 7
+  1032                                      ; ret
+  1033 000009F9 C607C3                      mov byte [rdi], 0xC3
+  1034 000009FC 4883C701                    add rdi, 1
+  1035                                  
+  1036 00000A00 4C8D15(C0260000)            lea r10, [rel output_buf]
+  1037 00000A07 4C29D7                      sub rdi, r10
+  1038 00000A0A 893D(10000000)              mov [rel startup_end], edi
+  1039 00000A10 4C01D7                      add rdi, r10
+  1040                                  
+  1041 00000A13 4531ED                      xor r13d, r13d
+  1042 00000A16 448B35(04000000)            mov r14d, [rel inst_count]
+  1043                                  
+  1044                                  .loop:
+  1045 00000A1D 4539F5                      cmp r13d, r14d
+  1046 00000A20 0F8D26030000                jge .end
+  1047                                  
+  1048 00000A26 488D1D(00080000)            lea rbx, [rel inst_buf]
+  1049 00000A2D 416BC51A                    imul eax, r13d, 26
+  1050 00000A31 4801C3                      add rbx, rax
+  1051 00000A34 0FB60B                      movzx ecx, byte [rbx]
+  1052 00000A37 4C8B4301                    mov r8, [rbx+1]
+  1053 00000A3B 4C8B4B09                    mov r9, [rbx+9]
+  1054 00000A3F 4C8B5B11                    mov r11, [rbx+17]
+  1055                                  
+  1056 00000A43 80F940                      cmp cl, 0x40
+  1057 00000A46 0F84F8020000                je .next
+  1058                                  
+  1059 00000A4C 80F930                      cmp cl, 0x30
+  1060 00000A4F 0F84EF000000                je .set
+  1061 00000A55 80F960                      cmp cl, 0x60
+  1062 00000A58 0F84FD000000                je .get
+  1063 00000A5E 80F961                      cmp cl, 0x61
+  1064 00000A61 0F8409010000                je .add
+  1065 00000A67 80F962                      cmp cl, 0x62
+  1066 00000A6A 0F841D010000                je .sub
+  1067 00000A70 80F965                      cmp cl, 0x65
+  1068 00000A73 0F8431010000                je .cmp
+  1069 00000A79 80F966                      cmp cl, 0x66
+  1070 00000A7C 0F8442010000                je .inc
+  1071 00000A82 80F967                      cmp cl, 0x67
+  1072 00000A85 0F8458010000                je .dec
+  1073 00000A8B 80F968                      cmp cl, 0x68
+  1074 00000A8E 0F846E010000                je .addv
+  1075 00000A94 80F969                      cmp cl, 0x69
+  1076 00000A97 0F8487010000                je .subv
+  1077 00000A9D 80F963                      cmp cl, 0x63
+  1078 00000AA0 0F84A0010000                je .mul
+  1079 00000AA6 80F941                      cmp cl, 0x41
+  1080 00000AA9 0F84B9010000                je .call
+  1081 00000AAF 80F970                      cmp cl, 0x70
+  1082 00000AB2 0F84BA010000                je .jmp
+  1083 00000AB8 80F971                      cmp cl, 0x71
+  1084 00000ABB 0F84BB010000                je .je
+  1085 00000AC1 80F972                      cmp cl, 0x72
+  1086 00000AC4 0F84B6010000                je .jne
+  1087 00000ACA 80F973                      cmp cl, 0x73
+  1088 00000ACD 0F84B1010000                je .jl
+  1089 00000AD3 80F974                      cmp cl, 0x74
+  1090 00000AD6 0F84AC010000                je .jge
+  1091 00000ADC 80F975                      cmp cl, 0x75
+  1092 00000ADF 0F84A7010000                je .jle
+  1093 00000AE5 80F976                      cmp cl, 0x76
+  1094 00000AE8 0F84A2010000                je .jg
+  1095 00000AEE 80F977                      cmp cl, 0x77
+  1096 00000AF1 0F849D010000                je .jb
+  1097 00000AF7 80F978                      cmp cl, 0x78
+  1098 00000AFA 0F8498010000                je .jae
+  1099 00000B00 80F950                      cmp cl, 0x50
+  1100 00000B03 0F84D2010000                je .loadfile
+  1101 00000B09 80F979                      cmp cl, 0x79
+  1102 00000B0C 0F848A010000                je .jbe
+  1103 00000B12 80F97A                      cmp cl, 0x7A
+  1104 00000B15 0F8485010000                je .ja
+  1105 00000B1B 80F980                      cmp cl, 0x80
+  1106 00000B1E 0F8488010000                je .ldb
+  1107 00000B24 80F9A0                      cmp cl, 0xA0
+  1108 00000B27 0F8499010000                je .raw
+  1109 00000B2D 80F9A1                      cmp cl, 0xA1
+  1110 00000B30 0F8499010000                je .raw1
+  1111 00000B36 80F9FF                      cmp cl, 0xFF
+  1112 00000B39 0F8400020000                je .ret
+  1113 00000B3F E900020000                  jmp .next
+  1114                                  
+  1115                                  .set:
+  1116                                      ; FIX: read slot and imm directly from inst_buf (args now parsed correctly)
+  1117 00000B44 0FB65302                    movzx edx, byte [rbx+2]   ; imm from inst_buf[2]
+  1118 00000B48 E8E1FCFFFF                  call emit_movabs_rax
+  1119 00000B4D 0FB64301                    movzx eax, byte [rbx+1]   ; slot from inst_buf[1]
+  1120 00000B51 E8E8FCFFFF                  call emit_store_state
+  1121 00000B56 E9E9010000                  jmp .next
+  1122                                  .get:
+  1123 00000B5B 4489C8                      mov eax, r9d
+  1124 00000B5E E802FDFFFF                  call emit_load_rax
+  1125 00000B63 4489C0                      mov eax, r8d
+  1126 00000B66 E8D3FCFFFF                  call emit_store_state
+  1127 00000B6B E9D4010000                  jmp .next
+  1128                                  .add:
+  1129 00000B70 4489C0                      mov eax, r8d
+  1130 00000B73 E8EDFCFFFF                  call emit_load_rax
+  1131 00000B78 4489CA                      mov edx, r9d
+  1132 00000B7B E833FDFFFF                  call emit_add_imm
+  1133 00000B80 4489C0                      mov eax, r8d
+  1134 00000B83 E8B6FCFFFF                  call emit_store_state
+  1135 00000B88 E9B7010000                  jmp .next
+  1136                                  .sub:
+  1137 00000B8D 4489C0                      mov eax, r8d
+  1138 00000B90 E8D0FCFFFF                  call emit_load_rax
+  1139 00000B95 4489CA                      mov edx, r9d
+  1140 00000B98 E846FDFFFF                  call emit_sub_imm
+  1141 00000B9D 4489C0                      mov eax, r8d
+  1142 00000BA0 E899FCFFFF                  call emit_store_state
+  1143 00000BA5 E99A010000                  jmp .next
+  1144                                  .cmp:
+  1145 00000BAA 4489C0                      mov eax, r8d
+  1146 00000BAD E8B3FCFFFF                  call emit_load_rax
+  1147 00000BB2 4489C8                      mov eax, r9d
+  1148 00000BB5 E8D2FCFFFF                  call emit_load_rdx
+  1149 00000BBA E854FDFFFF                  call emit_cmp_reg
+  1150 00000BBF E980010000                  jmp .next
+  1151                                  .inc:
+  1152 00000BC4 4489C0                      mov eax, r8d
+  1153 00000BC7 E899FCFFFF                  call emit_load_rax
+  1154 00000BCC BA01000000                  mov edx, 1
+  1155 00000BD1 E8DDFCFFFF                  call emit_add_imm
+  1156 00000BD6 4489C0                      mov eax, r8d
+  1157 00000BD9 E860FCFFFF                  call emit_store_state
+  1158 00000BDE E961010000                  jmp .next
+  1159                                  .dec:
+  1160 00000BE3 4489C0                      mov eax, r8d
+  1161 00000BE6 E87AFCFFFF                  call emit_load_rax
+  1162 00000BEB BA01000000                  mov edx, 1
+  1163 00000BF0 E8EEFCFFFF                  call emit_sub_imm
+  1164 00000BF5 4489C0                      mov eax, r8d
+  1165 00000BF8 E841FCFFFF                  call emit_store_state
+  1166 00000BFD E942010000                  jmp .next
+  1167                                  .addv:
+  1168 00000C02 4489C0                      mov eax, r8d
+  1169 00000C05 E85BFCFFFF                  call emit_load_rax
+  1170 00000C0A 4489C8                      mov eax, r9d
+  1171 00000C0D E87AFCFFFF                  call emit_load_rdx
+  1172 00000C12 E80CFDFFFF                  call emit_add_reg
+  1173 00000C17 4489C0                      mov eax, r8d
+  1174 00000C1A E81FFCFFFF                  call emit_store_state
+  1175 00000C1F E920010000                  jmp .next
+  1176                                  .subv:
+  1177 00000C24 4489C0                      mov eax, r8d
+  1178 00000C27 E839FCFFFF                  call emit_load_rax
+  1179 00000C2C 4489C8                      mov eax, r9d
+  1180 00000C2F E858FCFFFF                  call emit_load_rdx
+  1181 00000C34 E8FAFCFFFF                  call emit_sub_reg
+  1182 00000C39 4489C0                      mov eax, r8d
+  1183 00000C3C E8FDFBFFFF                  call emit_store_state
+  1184 00000C41 E9FE000000                  jmp .next
+  1185                                  .mul:
+  1186 00000C46 4489C0                      mov eax, r8d
+  1187 00000C49 E817FCFFFF                  call emit_load_rax
+  1188 00000C4E 4489C8                      mov eax, r9d
+  1189 00000C51 E836FCFFFF                  call emit_load_rdx
+  1190 00000C56 E8E8FCFFFF                  call emit_mul_reg
+  1191 00000C5B 4489C0                      mov eax, r8d
+  1192 00000C5E E8DBFBFFFF                  call emit_store_state
+  1193 00000C63 E9DC000000                  jmp .next
+  1194                                  .call:
+  1195 00000C68 E8EAFCFFFF                  call emit_call_placeholder
+  1196 00000C6D E9D2000000                  jmp .next
+  1197                                  .jmp:
+  1198 00000C72 E8EFFCFFFF                  call emit_jmp_placeholder
+  1199 00000C77 E9C8000000                  jmp .next
+  1200                                  .je:
+  1201 00000C7C B084                        mov al, 0x84
+  1202 00000C7E EB22                        jmp .jcc
+  1203                                  .jne:
+  1204 00000C80 B085                        mov al, 0x85
+  1205 00000C82 EB1E                        jmp .jcc
+  1206                                  .jl:
+  1207 00000C84 B08C                        mov al, 0x8C
+  1208 00000C86 EB1A                        jmp .jcc
+  1209                                  .jge:
+  1210 00000C88 B08D                        mov al, 0x8D
+  1211 00000C8A EB16                        jmp .jcc
+  1212                                  .jle:
+  1213 00000C8C B08E                        mov al, 0x8E
+  1214 00000C8E EB12                        jmp .jcc
+  1215                                  .jg:
+  1216 00000C90 B08F                        mov al, 0x8F
+  1217 00000C92 EB0E                        jmp .jcc
+  1218                                  .jb:
+  1219 00000C94 B082                        mov al, 0x82
+  1220 00000C96 EB0A                        jmp .jcc
+  1221                                  .jae:
+  1222 00000C98 B083                        mov al, 0x83
+  1223 00000C9A EB06                        jmp .jcc
+  1224                                  .jbe:
+  1225 00000C9C B086                        mov al, 0x86
+  1226 00000C9E EB02                        jmp .jcc
+  1227                                  .ja:
+  1228 00000CA0 B087                        mov al, 0x87
+  1229                                  .jcc:
+  1230 00000CA2 E8CEFCFFFF                  call emit_jcc_placeholder
+  1231 00000CA7 E998000000                  jmp .next
+  1232                                  .ldb:
+  1233 00000CAC 4489C8                      mov eax, r9d
+  1234 00000CAF E8D8FBFFFF                  call emit_load_rdx
+  1235 00000CB4 4588DA                      mov r10b, r11b
+  1236 00000CB7 E8CBFCFFFF                  call emit_movzx_byte
+  1237 00000CBC 4489C0                      mov eax, r8d
+  1238 00000CBF E87AFBFFFF                  call emit_store_state
+  1239 00000CC4 EB7E                        jmp .next
+  1240                                  .raw:
+  1241 00000CC6 448807                      mov byte [rdi], r8b
+  1242 00000CC9 4883C701                    add rdi, 1
+  1243 00000CCD EB75                        jmp .next
+  1244                                  .raw1:
+  1245                                      ; 0xA1: emit 1 byte from inst_buf[1]
+  1246 00000CCF 0FB64301                    movzx eax, byte [rbx+1]
+  1247 00000CD3 8807                        mov byte [rdi], al
+  1248 00000CD5 4883C701                    add rdi, 1
+  1249 00000CD9 EB69                        jmp .next
+  1250                                  .loadfile:
+  1251                                      ; 0x50: stub - just set state[slot] = state[slot+1] = 0
+  1252                                      ; Real implementation would call CreateFileA, GetFileSize, VirtualAlloc, ReadFile, CloseHandle
+  1253 00000CDB 31C0                        xor eax, eax
+  1254 00000CDD 0FB65301                    movzx edx, byte [rbx+1]   ; slot
+  1255 00000CE1 83FA10                      cmp edx, 16
+  1256 00000CE4 7314                        jae .lf_d32
+  1257 00000CE6 C60749                      mov byte [rdi], 0x49
+  1258 00000CE9 C6470189                    mov byte [rdi+1], 0x89
+  1259 00000CED C6470247                    mov byte [rdi+2], 0x47
+  1260 00000CF1 885703                      mov byte [rdi+3], dl
+  1261 00000CF4 4883C704                    add rdi, 4
+  1262 00000CF8 EB12                        jmp .lf_store2
+  1263                                  .lf_d32:
+  1264 00000CFA C60749                      mov byte [rdi], 0x49
+  1265 00000CFD C6470189                    mov byte [rdi+1], 0x89
+  1266 00000D01 C6470287                    mov byte [rdi+2], 0x87
+  1267 00000D05 895703                      mov dword [rdi+3], edx
+  1268 00000D08 4883C707                    add rdi, 7
+  1269                                  .lf_store2:
+  1270                                      ; state[slot+1] = 0 too
+  1271 00000D0C 0FB65301                    movzx edx, byte [rbx+1]
+  1272 00000D10 FFC2                        inc edx
+  1273 00000D12 83FA10                      cmp edx, 16
+  1274 00000D15 7314                        jae .lf_d32b
+  1275 00000D17 C60749                      mov byte [rdi], 0x49
+  1276 00000D1A C6470189                    mov byte [rdi+1], 0x89
+  1277 00000D1E C6470247                    mov byte [rdi+2], 0x47
+  1278 00000D22 885703                      mov byte [rdi+3], dl
+  1279 00000D25 4883C704                    add rdi, 4
+  1280 00000D29 EB19                        jmp .next
+  1281                                  .lf_d32b:
+  1282 00000D2B C60749                      mov byte [rdi], 0x49
+  1283 00000D2E C6470189                    mov byte [rdi+1], 0x89
+  1284 00000D32 C6470287                    mov byte [rdi+2], 0x87
+  1285 00000D36 895703                      mov dword [rdi+3], edx
+  1286 00000D39 4883C707                    add rdi, 7
+  1287 00000D3D EB05                        jmp .next
+  1288                                  .ret:
+  1289 00000D3F E857FCFFFF                  call emit_ret_instr
+  1290                                  
+  1291                                  .next:
+  1292 00000D44 41FFC5                      inc r13d
+  1293 00000D47 E9D1FCFFFF                  jmp .loop
+  1294                                  
+  1295                                  .end:
+  1296 00000D4C 4C8D15(C0260000)            lea r10, [rel output_buf]
+  1297 00000D53 4C29D7                      sub rdi, r10
+  1298 00000D56 893D(0C000000)              mov [rel emitted_total], edi
+  1299 00000D5C 415E                        pop r14
+  1300 00000D5E 415D                        pop r13
+  1301 00000D60 415C                        pop r12
+  1302 00000D62 C3                          ret
+  1303                                  
+  1304                                  ; ── FIXUP ──────────────────────────────────────────────────────────
+  1305                                  fixup:
+  1306 00000D63 4154                        push r12
+  1307 00000D65 4155                        push r13
+  1308                                  
+  1309 00000D67 4C8D3D(C0260000)            lea r15, [rel output_buf]
+  1310 00000D6E 448B25(10000000)            mov r12d, [rel startup_end]
+  1311 00000D75 4531ED                      xor r13d, r13d
+  1312 00000D78 4531F6                      xor r14d, r14d
+  1313                                  
+  1314                                  .loop:
+  1315 00000D7B 443B35(04000000)            cmp r14d, [rel inst_count]
+  1316 00000D82 0F8DB8000000                jge .done
+  1317                                  
+  1318 00000D88 488D1D(00080000)            lea rbx, [rel inst_buf]
+  1319 00000D8F 416BC61A                    imul eax, r14d, 26
+  1320 00000D93 4801C3                      add rbx, rax
+  1321 00000D96 0FB60B                      movzx ecx, byte [rbx]
+  1322 00000D99 0FB64319                    movzx eax, byte [rbx+25]
+  1323 00000D9D 4189C3                      mov r11d, eax
+  1324                                  
+  1325 00000DA0 80F940                      cmp cl, 0x40
+  1326 00000DA3 0F848C000000                je .next
+  1327                                  
+  1328 00000DA9 80F941                      cmp cl, 0x41
+  1329 00000DAC 7439                        je .do5
+  1330 00000DAE 80F970                      cmp cl, 0x70
+  1331 00000DB1 7434                        je .do5
+  1332 00000DB3 80F971                      cmp cl, 0x71
+  1333 00000DB6 7457                        je .do6
+  1334 00000DB8 80F972                      cmp cl, 0x72
+  1335 00000DBB 7452                        je .do6
+  1336 00000DBD 80F973                      cmp cl, 0x73
+  1337 00000DC0 744D                        je .do6
+  1338 00000DC2 80F974                      cmp cl, 0x74
+  1339 00000DC5 7448                        je .do6
+  1340 00000DC7 80F975                      cmp cl, 0x75
+  1341 00000DCA 7443                        je .do6
+  1342 00000DCC 80F976                      cmp cl, 0x76
+  1343 00000DCF 743E                        je .do6
+  1344 00000DD1 80F977                      cmp cl, 0x77
+  1345 00000DD4 7439                        je .do6
+  1346 00000DD6 80F978                      cmp cl, 0x78
+  1347 00000DD9 7434                        je .do6
+  1348 00000DDB 80F979                      cmp cl, 0x79
+  1349 00000DDE 742F                        je .do6
+  1350 00000DE0 80F97A                      cmp cl, 0x7A
+  1351 00000DE3 742A                        je .do6
+  1352 00000DE5 EB4E                        jmp .next
+  1353                                  
+  1354                                  .do5:
+  1355 00000DE7 8B5301                      mov edx, [rbx+1]
+  1356 00000DEA 488D05(00220000)            lea rax, [rel handler_off]
+  1357 00000DF1 8B1490                      mov edx, [rax+rdx*4]
+  1358 00000DF4 4401E2                      add edx, r12d
+  1359 00000DF7 438D042C                    lea eax, [r12+r13]
+  1360 00000DFB 29C2                        sub edx, eax
+  1361 00000DFD 83EA05                      sub edx, 5
+  1362 00000E00 4B8D0427                    lea rax, [r15+r12]
+  1363 00000E04 4C01E8                      add rax, r13
+  1364 00000E07 895001                      mov [rax+1], edx
+  1365 00000E0A 4489D8                      mov eax, r11d
+  1366 00000E0D EB26                        jmp .next
+  1367                                  
+  1368                                  .do6:
+  1369 00000E0F 8B5301                      mov edx, [rbx+1]
+  1370 00000E12 488D05(00220000)            lea rax, [rel handler_off]
+  1371 00000E19 8B1490                      mov edx, [rax+rdx*4]
+  1372 00000E1C 4401E2                      add edx, r12d
+  1373 00000E1F 438D042C                    lea eax, [r12+r13]
+  1374 00000E23 29C2                        sub edx, eax
+  1375 00000E25 83EA06                      sub edx, 6
+  1376 00000E28 4B8D0427                    lea rax, [r15+r12]
+  1377 00000E2C 4C01E8                      add rax, r13
+  1378 00000E2F 895002                      mov [rax+2], edx
+  1379 00000E32 4489D8                      mov eax, r11d
+  1380                                  
+  1381                                  .next:
+  1382 00000E35 4101C5                      add r13d, eax
+  1383 00000E38 41FFC6                      inc r14d
+  1384 00000E3B E93BFFFFFF                  jmp .loop
+  1385                                  
+  1386                                  .done:
+  1387                                      ; Fixup startup blob's call to H_00 (call at offset 10)
+  1388 00000E40 8B05(10000000)              mov eax, [rel startup_end]
+  1389 00000E46 83E80F                      sub eax, 15          ; startup_end - (call_offset + 5)
+  1390 00000E49 4189470B                    mov [r15+11], eax    ; displacement field at call_offset + 1
+  1391 00000E4D 415D                        pop r13
+  1392 00000E4F 415C                        pop r12
+  1393 00000E51 C3                          ret
+  1394                                  
+  1395                                  ; ── WRITE OUTPUT PE ────────────────────────────────────────────────
+  1396                                  write_output:
+  1397 00000E52 4154                        push r12
+  1398 00000E54 4155                        push r13
+  1399 00000E56 4156                        push r14
+  1400                                  
+  1401 00000E58 4C8D25(C0260100)            lea r12, [rel pe_work_buf]
+  1402                                  
+  1403 00000E5F 6641C704244D5A              mov word [r12], 'MZ'
+  1404                                      ; DEBUG
+  1405 00000E66 8B0D(04000000)              mov ecx, [rel inst_count]
+  1406 00000E6C 41894C2404                  mov [r12+4], ecx
+  1407 00000E71 8B0D(0C000000)              mov ecx, [rel emitted_total]
+  1408 00000E77 41894C2408                  mov [r12+8], ecx
+  1409 00000E7C 8B0D(10000000)              mov ecx, [rel startup_end]
+  1410 00000E82 41894C240C                  mov [r12+12], ecx
+  1411                                      ; DEBUG parse_debug (r14d at end of parse)
+  1412 00000E87 8B05(C0260300)              mov eax, [rel parse_debug]
+  1413 00000E8D 418944241C                  mov [r12+0x1C], eax
+  1414 00000E92 8B0D(0C000000)              mov ecx, [rel emitted_total]
+  1415 00000E98 41894C2408                  mov [r12+8], ecx
+  1416 00000E9D 8B0D(10000000)              mov ecx, [rel startup_end]
+  1417 00000EA3 41894C240C                  mov [r12+12], ecx
+  1418 00000EA8 8B0D(14000000)              mov ecx, [rel bytes_read]
+  1419 00000EAE 41894C2410                  mov [r12+16], ecx
+  1420 00000EB3 8B0D(00000000)              mov ecx, [rel fixup_cnt]
+  1421 00000EB9 41894C2414                  mov [r12+20], ecx
+  1422 00000EBE 8B0D(08000000)              mov ecx, [rel emitted_size]
+  1423 00000EC4 41894C2418                  mov [r12+24], ecx
+  1424                                      ; Dump first 24 opcodes + 24 full slot0-2 bytes
+  1425 00000EC9 488D35(00080000)            lea rsi, [rel inst_buf]
+  1426 00000ED0 498D7C2428                  lea rdi, [r12+0x28]
+  1427 00000ED5 B918000000                  mov ecx, 24
+  1428                                  .dump_opcodes:
+  1429 00000EDA 0FB606                      movzx eax, byte [rsi]
+  1430 00000EDD 8807                        mov [rdi], al
+  1431 00000EDF 48FFC7                      inc rdi
+  1432 00000EE2 4883C61A                    add rsi, 26
+  1433 00000EE6 FFC9                        dec ecx
+  1434 00000EE8 75F0                        jnz .dump_opcodes
+  1435                                      ; Dump raw inst_buf bytes 0-47 (first ~3 slots full)
+  1436 00000EEA 488D35(00080000)            lea rsi, [rel inst_buf]
+  1437 00000EF1 498D7C2440                  lea rdi, [r12+0x40]
+  1438 00000EF6 B930000000                  mov ecx, 48
+  1439 00000EFB F3A4                        rep movsb
+  1440                                      ; Dump first 16 bytes of input_buf
+  1441 00000EFD 488D35(18000000)            lea rsi, [rel input_buf]
+  1442 00000F04 498D7C2470                  lea rdi, [r12+0x70]
+  1443 00000F09 B910000000                  mov ecx, 16
+  1444 00000F0E F3A4                        rep movsb
+  1445 00000F10 41C744243C80000000          mov dword [r12+0x3C], 0x80
+  1446 00000F19 41C784248000000050-         mov dword [r12+0x80], 0x00004550
+  1446 00000F22 450000             
+  1447 00000F25 6641C7842484000000-         mov word [r12+0x84], 0x8664
+  1447 00000F2E 6486               
+  1448 00000F30 6641C7842486000000-         mov word [r12+0x86], 1
+  1448 00000F39 0100               
+  1449 00000F3B 41C784248800000000-         mov dword [r12+0x88], 0
+  1449 00000F44 000000             
+  1450 00000F47 41C784248C00000000-         mov dword [r12+0x8C], 0
+  1450 00000F50 000000             
+  1451 00000F53 41C784249000000000-         mov dword [r12+0x90], 0
+  1451 00000F5C 000000             
+  1452 00000F5F 6641C7842494000000-         mov word [r12+0x94], 0x80
+  1452 00000F68 8000               
+  1453 00000F6A 6641C7842496000000-         mov word [r12+0x96], 0x002F
+  1453 00000F73 2F00               
+  1454 00000F75 6641C7842498000000-         mov word [r12+0x98], 0x020B
+  1454 00000F7E 0B02               
+  1455 00000F80 6641C784249A000000-         mov word [r12+0x9A], 0
+  1455 00000F89 0000               
+  1456                                  
+  1457 00000F8B 8B05(0C000000)              mov eax, [rel emitted_total]
+  1458 00000F91 05FF010000                  add eax, 0x1FF
+  1459 00000F96 2500FEFFFF                  and eax, 0xFFFFFE00
+  1460 00000F9B 418984249C000000            mov dword [r12+0x9C], eax
+  1461 00000FA3 41C78424A000000000-         mov dword [r12+0xA0], 0
+  1461 00000FAC 000000             
+  1462 00000FAF 41C78424A400000000-         mov dword [r12+0xA4], 0
+  1462 00000FB8 000000             
+  1463 00000FBB 41C78424A800000000-         mov dword [r12+0xA8], 0x1000
+  1463 00000FC4 100000             
+  1464 00000FC7 41C78424AC00000000-         mov dword [r12+0xAC], 0x1000
+  1464 00000FD0 100000             
+  1465 00000FD3 41C78424B000000000-         mov dword [r12+0xB0], 0x40000000
+  1465 00000FDC 000040             
+  1466 00000FDF 41C78424B400000001-         mov dword [r12+0xB4], 0x00000001
+  1466 00000FE8 000000             
+  1467 00000FEB 41C78424B800000000-         mov dword [r12+0xB8], 0x1000
+  1467 00000FF4 100000             
+  1468 00000FF7 41C78424BC00000000-         mov dword [r12+0xBC], 0x200
+  1468 00001000 020000             
+  1469 00001003 6641C78424C0000000-         mov word [r12+0xC0], 6
+  1469 0000100C 0600               
+  1470 0000100E 6641C78424C2000000-         mov word [r12+0xC2], 0
+  1470 00001017 0000               
+  1471 00001019 6641C78424C4000000-         mov word [r12+0xC4], 0
+  1471 00001022 0000               
+  1472 00001024 6641C78424C6000000-         mov word [r12+0xC6], 0
+  1472 0000102D 0000               
+  1473 0000102F 6641C78424C8000000-         mov word [r12+0xC8], 6
+  1473 00001038 0600               
+  1474 0000103A 6641C78424CA000000-         mov word [r12+0xCA], 0
+  1474 00001043 0000               
+  1475 00001045 41C78424CC00000000-         mov dword [r12+0xCC], 0
+  1475 0000104E 000000             
+  1476 00001051 8B05(0C000000)              mov eax, [rel emitted_total]
+  1477 00001057 05FF0F0000                  add eax, 0xFFF
+  1478 0000105C 2500F0FFFF                  and eax, 0xFFFFF000
+  1479 00001061 0500100000                  add eax, 0x1000
+  1480 00001066 41898424D0000000            mov dword [r12+0xD0], eax
+  1481                                  
+  1482 0000106E 41C78424D400000000-         mov dword [r12+0xD4], 0x200
+  1482 00001077 020000             
+  1483 0000107A 41C78424D800000000-         mov dword [r12+0xD8], 0
+  1483 00001083 000000             
+  1484 00001086 6641C78424DC000000-         mov word [r12+0xDC], 3
+  1484 0000108F 0300               
+  1485 00001091 6641C78424DE000000-         mov word [r12+0xDE], 0
+  1485 0000109A 0000               
+  1486 0000109C 49C78424E000000000-         mov qword [r12+0xE0], 0x100000
+  1486 000010A5 001000             
+  1487 000010A8 49C78424E800000000-         mov qword [r12+0xE8], 0x1000
+  1487 000010B1 100000             
+  1488 000010B4 49C78424F000000000-         mov qword [r12+0xF0], 0x100000
+  1488 000010BD 001000             
+  1489 000010C0 49C78424F800000000-         mov qword [r12+0xF8], 0x1000
+  1489 000010C9 100000             
+  1490 000010CC 41C784240001000000-         mov dword [r12+0x100], 0
+  1490 000010D5 000000             
+  1491 000010D8 41C784240401000000-         mov dword [r12+0x104], 0
+  1491 000010E1 000000             
+  1492 000010E4 49C784240801000000-         mov qword [r12+0x108], 0
+  1492 000010ED 000000             
+  1493 000010F0 49C784241001000000-         mov qword [r12+0x110], 0
+  1493 000010F9 000000             
+  1494                                  
+  1495 000010FC 41C78424180100002E-         mov dword [r12+0x118], 0x7865742E
+  1495 00001105 746578             
+  1496 00001108 41C784241C01000074-         mov dword [r12+0x11C], 0x00000074
+  1496 00001111 000000             
+  1497 00001114 8B05(0C000000)              mov eax, [rel emitted_total]
+  1498 0000111A 05FF0F0000                  add eax, 0xFFF
+  1499 0000111F 2500F0FFFF                  and eax, 0xFFFFF000
+  1500 00001124 4189842420010000            mov dword [r12+0x120], eax
+  1501 0000112C 41C784242401000000-         mov dword [r12+0x124], 0x1000
+  1501 00001135 100000             
+  1502 00001138 8B05(0C000000)              mov eax, [rel emitted_total]
+  1503 0000113E 05FF010000                  add eax, 0x1FF
+  1504 00001143 2500FEFFFF                  and eax, 0xFFFFFE00
+  1505 00001148 4189842428010000            mov dword [r12+0x128], eax
+  1506 00001150 41C784242C01000000-         mov dword [r12+0x12C], 0x200
+  1506 00001159 020000             
+  1507 0000115C 41C784243001000000-         mov dword [r12+0x130], 0
+  1507 00001165 000000             
+  1508 00001168 41C784243401000000-         mov dword [r12+0x134], 0
+  1508 00001171 000000             
+  1509 00001174 6641C7842438010000-         mov word [r12+0x138], 0
+  1509 0000117D 0000               
+  1510 0000117F 6641C784243A010000-         mov word [r12+0x13A], 0
+  1510 00001188 0000               
+  1511 0000118A 41C784243C01000020-         mov dword [r12+0x13C], 0x60000020
+  1511 00001193 000060             
+  1512                                  
+  1513 00001196 8B0D(10000000)              mov ecx, [rel startup_end]
+  1514 0000119C 030D(0C000000)              add ecx, [rel emitted_total]
+  1515 000011A2 488D35(C0260000)            lea rsi, [rel output_buf]
+  1516 000011A9 498DBC2400020000            lea rdi, [r12+0x200]
+  1517 000011B1 F3A4                        rep movsb
+  1518                                  
+  1519 000011B3 8B05(10000000)              mov eax, [rel startup_end]
+  1520 000011B9 0305(0C000000)              add eax, [rel emitted_total]
+  1521 000011BF 05FF010000                  add eax, 0x1FF
+  1522 000011C4 2500FEFFFF                  and eax, 0xFFFFFE00
+  1523 000011C9 0500020000                  add eax, 0x200
+  1524 000011CE 4189C6                      mov r14d, eax
+  1525 000011D1 E8AFEFFFFF                  call open_write
+  1526 000011D6 4883F8FF                    cmp rax, -1
+  1527 000011DA 745E                        je .fail
+  1528 000011DC 4989C5                      mov r13, rax
+  1529                                  
+  1530 000011DF 4C89E9                      mov rcx, r13
+  1531 000011E2 488D15(C0260100)            lea rdx, [rel pe_work_buf]
+  1532 000011E9 4589F0                      mov r8d, r14d
+  1533 000011EC 4C8D0D(2C400000)            lea r9, [rel bytes_written_pe]
+  1534 000011F3 4883EC30                    sub rsp, 0x30
+  1535 000011F7 48C744242000000000          mov qword [rsp+0x20], 0   ; lpOverlapped = NULL
+  1536                                      ; DEBUG: dump parse_byte_log to pe_work_buf+0x180 (preserve rcx)
+  1537 00001200 51                          push rcx
+  1538 00001201 488D35(CC270300)            lea rsi, [rel parse_byte_log]
+  1539 00001208 4C89E7                      mov rdi, r12
+  1540 0000120B 4881C780010000              add rdi, 0x180
+  1541 00001212 B910000000                  mov ecx, 16
+  1542 00001217 F3A5                        rep movsd
+  1543 00001219 59                          pop rcx
+  1544 0000121A E8(00000000)                call WriteFile
+  1545 0000121F 4883C430                    add rsp, 0x30
+  1546                                  
+  1547 00001223 4C89E9                      mov rcx, r13
+  1548 00001226 4883EC20                    sub rsp, 0x20
+  1549 0000122A E8(00000000)                call CloseHandle
+  1550 0000122F 4883C420                    add rsp, 0x20
+  1551                                  
+  1552 00001233 415E                        pop r14
+  1553 00001235 415D                        pop r13
+  1554 00001237 415C                        pop r12
+  1555 00001239 C3                          ret
+  1556                                  
+  1557                                  .fail:
+  1558 0000123A B902000000                  mov ecx, 2
+  1559 0000123F E8(00000000)                call ExitProcess
+  1560                                  
+  1561                                  section .bss
+  1562 00000000 <res 800h>              state_buf:     resb 2048
+  1563 00000800 <res 1A00h>             inst_buf:      resb 256*26
+  1564 00002200 <res 400h>              handler_off:   resd 256
+  1565 00002600 <res C0h>               fixup_buf:     resb 64*3
+  1566 000026C0 <res 10000h>            output_buf:    resb 65536
+  1567 000126C0 <res 20000h>            pe_work_buf:   resb 131072
+  1568 000326C0 ????????????????        parse_debug:   resq 1
+  1569 000326C8 <res 104h>              input_fn_buf:  resb 260
+  1570 000327CC <res 40h>               parse_byte_log:      resd 16
+  1571 0003280C ????????                parse_byte_log_idx:  resd 1
+  1572 00032810 ????????                opcode_check: resd 1
+  1573 00032814 ????????                opcode_val:   resd 1
+  1574 00032818 ????????                nl_check:     resd 1
+  1575 0003281C ????????                arg_count:           resd 1
+  1576                                  
+  1577                                  section .data
+  1578 00000000 00000000                fixup_cnt:     dd 0
+  1579 00000004 00000000                inst_count:    dd 0
+  1580 00000008 00000000                emitted_size:  dd 0
+  1581 0000000C 00000000                emitted_total: dd 0
+  1582 00000010 00000000                startup_end:   dd 0
+  1583 00000014 00000000                bytes_read:    dd 0
+  1584 00000018 00<rep 4000h>           input_buf:     times 16384 db 0
+  1585 00004018 696E7075742E6B7900      input_fn:      db 'input.ky', 0
+  1586 00004021 6F75747075742E6578-     output_fn:     db 'output.exe', 0
+  1586 0000402A 6500               
+  1587 0000402C 00000000                bytes_written_pe: dd 0
+  1588                                  ; DEBUG: parse_byte call counter in .data
+  1589 00004030 00000000                debug_call_count:    dd 0
+  1590 00004034 000000000000000000-     debug_first_8_bytes: dd 0, 0, 0, 0, 0, 0, 0, 0
+  1590 0000403D 000000000000000000-
+  1590 00004046 000000000000000000-
+  1590 0000404F 0000000000         

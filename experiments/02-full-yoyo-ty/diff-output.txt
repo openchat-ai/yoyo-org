@@ -1,0 +1,50 @@
+yoyo.exe : # startup skipped: a=14 bytes, b=23 bytes (per-binary auto-detect)
+???? ?:1 ??: 11
++ $output = & F:\yoyo-org\yoyo-rust\target\release\yoyo.exe diff F:\yoy ...
++           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (# startup skipp...ry auto-detect):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+# diff: F:\yoyo-org\experiments\02-full-yoyo-ty\products\yoyo-rust.exe vs F:\yoyo-org\experiments\02-full-yoyo-ty\produ
+cts\yoyo-asm.exe
+# a.size = 1010, b.size = 1001
+warn: line 20: opcode 0x12 not implemented (skipped)
+warn: line 21: opcode 0x12 not implemented (skipped)
+warn: line 22: opcode 0x12 not implemented (skipped)
+# source: F:\yoyo-org\yoyo\projects\yoyo.ty (93 lines, 990 expected bytes)
+# emit chunks: 71
+# H_00 wrapper detected: 0 bytes (auto-aligned via first SET's mov rax, 0)
+# 629 byte differences found (showing first 30):
+
+line        offset    a           b           context
+Line 42     168       0x8D      0xB8      Line 42: 50
+Line 42     169       0x0D      0x00      Line 42: 50
+Line 42     174       0x48      0x00      Line 42: 50
+Line 42     175       0xBA      0x00      Line 42: 50
+Line 42     177       0x00      0x49      Line 42: 50
+Line 42     178       0x00      0x89      Line 42: 50
+Line 42     179       0x80      0x47      Line 42: 50
+Line 42     180       0x00      0x70      Line 42: 50
+Line 42     181       0x00      0x48      Line 42: 50
+Line 42     182       0x00      0xB8      Line 42: 50
+Line 42     184       0x49      0x00      Line 42: 50
+Line 42     185       0xB8      0x00      Line 42: 50
+Line 42     186       0x01      0x00      Line 42: 50
+Line 42     191       0x00      0x49      Line 42: 50
+Line 42     192       0x00      0x89      Line 42: 50
+Line 42     193       0x00      0x87      Line 42: 50
+Line 42     194       0x49      0x80      Line 42: 50
+Line 42     195       0xB9      0x00      Line 42: 50
+Line 42     198       0x00      0xE8      Line 42: 50
+Line 42     199       0x00      0x21      Line 42: 50
+Line 42     203       0x00      0xC3      Line 42: 50
+Line 42     206       0x03      0x00      Line 42: 50
+Line 42     214       0x50      0x49      Line 42: 50
+Line 42     215       0x48      0x89      Line 42: 50
+Line 42     216       0x83      0x47      Line 42: 50
+Line 42     217       0xEC      0x50      Line 42: 50
+Line 42     218       0x28      0x48      Line 42: 50
+Line 42     219       0xFF      0xB8      Line 42: 50
+Line 42     220       0x15      0x00      Line 42: 50
+Line 42     221       0x69      0x00      Line 42: 50
+... (599 more differences omitted)
