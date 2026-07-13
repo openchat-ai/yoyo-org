@@ -42,8 +42,8 @@ isaproc::isa! {
 0x00A1 RAW_BYTES bytes => raw_bytes bytes ; emit block of literal bytes
 
 // ── Syscall / Complex ───────────────────────────────────────────────
-0x0020 ALLOC slot sz      ; VirtualAlloc(0, sz, 0x3000, 0x40)
-0x0050 LOADFILE slot str_idx  ; ReadFile(str_idx) state[slot]=ptr state[slot+1]=sz
-0x0051 WRITEFILE id str_idx sz  ; CreateFileA+WriteFile+CloseHandle
+0x0020 ALLOC slot sz      => emit_alloc slot sz     ; VirtualAlloc (via platform)
+0x0050 LOADFILE slot str_idx => emit_loadfile slot str_idx  ; ReadFile (via platform)
+0x0051 WRITEFILE id str_idx sz => emit_writefile id str_idx sz  ; CreateFile+WriteFile+Close (via platform)
 
 } // isa!

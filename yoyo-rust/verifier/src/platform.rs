@@ -104,16 +104,44 @@ pub struct StubPlatform;
 impl Platform for StubPlatform {
     fn name(&self) -> &'static str { "stub" }
 
-    fn emit_alloc<const N: usize>(&self, _buf: &mut FixedBuf<N>, _slot: u16, _sz: u64) -> IsaResult<()> {
-        unimplemented!("StubPlatform does not support alloc")
+    fn emit_alloc<const N: usize>(&self, buf: &mut FixedBuf<N>, _slot: u16, _sz: u64) -> IsaResult<()> {
+        // stub: set state[slot] = 0 (no real alloc)
+        emit_st_loadfile(buf, 0, _slot)
     }
-    fn emit_loadfile<const N: usize>(&self, _buf: &mut FixedBuf<N>, _slot: u16, _str_idx: u8) -> IsaResult<()> {
-        unimplemented!("StubPlatform does not support loadfile")
+    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, _str_idx: u8) -> IsaResult<()> {
+        emit_st_loadfile(buf, 0, slot)
     }
     fn emit_writefile<const N: usize>(&self, _buf: &mut FixedBuf<N>, _id: u16, _str_idx: u8, _sz: u16) -> IsaResult<()> {
-        unimplemented!("StubPlatform does not support writefile")
+        // stub: no-op (success)
+        Ok(())
     }
     fn startup_blob(&self) -> &[u8] { &[] }
+}
+
+/// Emit stub code: state[slot] = rax, state[slot+1] = rax
+/// Matches yoy-asm's loadfile stub (just two stores, no xor).
+/// NOTE: yoy-asm does NOT emit `xor eax, eax` here, so we don't either.
+/// Caller must arrange for rax to be 0 before calling this stub.
+fn emit_st_loadfile<const N: usize>(buf: &mut FixedBuf<N>, _val: u64, slot: u16) -> IsaResult<()> {
+    // mov [r15+slot*8], rax  (caller must ensure rax holds the desired value)
+    store_r15(buf, slot)?;
+    // mov [r15+(slot+1)*8], rax
+    store_r15(buf, slot + 1)?;
+    Ok(())
+}
+
+/// Emit `49 89 47 XX` (disp8) or `49 89 87 XX XX XX XX` (disp32)
+fn store_r15<const N: usize>(buf: &mut FixedBuf<N>, slot: u16) -> IsaResult<()> {
+    buf.push(0x49)?;
+    buf.push(0x89)?;
+    if slot < 16 {
+        buf.push(0x47)?;
+        buf.push(slot as u8)?;
+    } else {
+        buf.push(0x87)?;
+        buf.extend(&(slot as u32).to_le_bytes())?;
+    }
+    Ok(())
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

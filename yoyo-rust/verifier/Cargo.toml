@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal workspace crates
 isaproc = { path = "../isa-proc" }
-libyoyo = { path = "../libyoyo" }
+# libyoyo = { path = "../libyoyo" }  # not directly imported by verifier
 
 [features]
 default = []
