@@ -41,9 +41,9 @@ function createWinEmitContext(prog, opts = {}) {
 
   const pe = new PE(); pe.subsys = 3;
   pe.addImport('KERNEL32.dll', WIN_FUNCS);
-  pe.setCode(Buffer.alloc(TEXT_VS, 0x90)); pe.setData(Buffer.alloc(1, 0)); pe.build();
+  pe.setCode(Buffer.alloc(TEXT_VS, 0x00)); pe.setData(Buffer.alloc(1, 0)); pe.build();
   const P = pe.ptrMap;
-  pe.setCode(Buffer.alloc(TEXT_VS, 0x90)); pe.setData(Buffer.alloc(1, 0)); pe.build();
+  pe.setCode(Buffer.alloc(TEXT_VS, 0x00)); pe.setData(Buffer.alloc(1, 0)); pe.build();
   const dr = pe.dataRVA;
 
   const code = new E.Buf();
@@ -440,7 +440,6 @@ function compileFromAnalyzed(prog, opts = {}) {
     for (const op of ops) ctx.emit(op);
     E.ret(ctx.code);
   }
-  while (ctx.code.tell() < TEXT_VS) ctx.code.u8(0x90);
   return ctx.finishPe();
 }
 
@@ -481,7 +480,6 @@ function compileFromTirModule(mod, opts = {}) {
     }
     E.ret(ctx.code);
   }
-  while (ctx.code.tell() < TEXT_VS) ctx.code.u8(0x90);
   return ctx.finishPe();
 }
 

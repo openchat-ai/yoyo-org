@@ -146,50 +146,49 @@ fn run_diff(args: &[String]) {
     let text_a_section = read_text_section_auto(&bytes_a);
     let text_b_section = read_text_section_auto(&bytes_b);
 
-    let skip = skip_startup.unwrap_or_else(|| {
-        // Auto-detect startup tail in either binary.
-        let detect = |bytes: &[u8], section: &pe_read::TextSection| -> u64 {
-            let slice = extract_text_slice(bytes, section);
-            if let Some(slice) = slice {
-                // Try both PE and ELF startup patterns; pick the one that
-                // returns Some.
-                if let Some(off) = pe_read::find_user_code_offset(&slice) {
-                    return off;
-                }
-                if let Some(off) = elf_read::find_user_code_offset(&slice) {
-                    return off;
-                }
+    // Per-binary skip detection (different templates have different startup lengths)
+    let detect_skip = |bytes: &[u8], section: &pe_read::TextSection| -> u64 {
+        let slice = extract_text_slice(bytes, section);
+        if let Some(slice) = slice {
+            if let Some(off) = pe_read::find_user_code_offset(&slice) {
+                return off;
             }
-            0x40
-        };
-        let a_skip = text_a_section.as_ref().map(|s| detect(&bytes_a, s)).unwrap_or(0x40);
-        let b_skip = text_b_section.as_ref().map(|s| detect(&bytes_b, s)).unwrap_or(0x40);
-        std::cmp::max(a_skip, b_skip)
+            if let Some(off) = elf_read::find_user_code_offset(&slice) {
+                return off;
+            }
+        }
+        0x40
+    };
+    let skip_a = skip_startup.unwrap_or_else(|| {
+        text_a_section.as_ref().map(|s| detect_skip(&bytes_a, s)).unwrap_or(0x40)
+    });
+    let skip_b = skip_startup.unwrap_or_else(|| {
+        text_b_section.as_ref().map(|s| detect_skip(&bytes_b, s)).unwrap_or(0x40)
     });
 
     let text_a = match text_a_section {
-        Some(s) => extract_user_code(&bytes_a, &s, skip),
+        Some(s) => extract_user_code(&bytes_a, &s, skip_a),
         None => {
             eprintln!("warning: {}: .text section not found, falling back to whole-file diff", path_a);
             bytes_a.clone()
         }
     };
     let text_b = match text_b_section {
-        Some(s) => extract_user_code(&bytes_b, &s, skip),
+        Some(s) => extract_user_code(&bytes_b, &s, skip_b),
         None => {
             eprintln!("warning: {}: .text section not found, falling back to whole-file diff", path_b);
             bytes_b.clone()
         }
     };
 
-    eprintln!("# startup skipped: {} bytes (auto-detected from startup tail)", skip);
+    eprintln!("# startup skipped: a={} bytes, b={} bytes (per-binary auto-detect)", skip_a, skip_b);
 
     eprintln!("# diff: {} vs {}", path_a, path_b);
     eprintln!("# a.size = {}, b.size = {}", text_a.len(), text_b.len());
 
     // If --source is provided, annotate the diff with source line numbers
     if let Some(src_path) = source_file {
-        run_annotated_diff(&text_a, &text_b, src_path, skip);
+        run_annotated_diff(&text_a, &text_b, src_path, skip_a);
         return;
     }
 
@@ -218,6 +217,10 @@ fn run_annotated_diff(
     source_path: &str,
     _skip_startup: u64,
 ) {
+    let _ = text_a;
+    let _ = text_b;
+    let _ = source_path;
+    let _ = _skip_startup;
     let src = match fs::read_to_string(source_path) {
         Ok(s) => s,
         Err(e) => {

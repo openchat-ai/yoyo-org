@@ -21,7 +21,7 @@ const JCC_MAP = {
 function createEmitContext(strs, strPos, opts = {}) {
   const isCompiler = opts.role !== 'output';
   const elf = new ELF();
-  elf.setCode(Buffer.alloc(TEXT_VS, 0x90));
+  elf.setCode(Buffer.alloc(TEXT_VS, 0x00));
   elf.setData(Buffer.alloc(1, 0));
   elf.build();
   const dr = elf.dataRVA;
@@ -248,7 +248,7 @@ function compileFromAnalyzed(prog, opts = {}) {
     for (const op of prog.handlers[h]) ctx.emitRawOp(op);
     E.ret(ctx.code);
   }
-  while (ctx.code.tell() < TEXT_VS) ctx.code.u8(0x90);
+  while (ctx.code.tell() < TEXT_VS) ctx.code.u8(0x00);
 
   return ctx.finish(prog, sOff);
 }

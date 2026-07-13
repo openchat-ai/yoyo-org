@@ -156,6 +156,7 @@ parse:
 
     ; rsi = start of input, ecx = bytes_read (set by caller)
     lea r10, [rsi+rcx]
+    nop
 
 .next_line:
     cmp rsi, r10
@@ -232,18 +233,130 @@ parse:
     inc rsi
     ; R12B = opcode
 
-    ; Store (only opcode at [0])
+    ; Store opcode at inst_buf[r14*26]
     push rcx
     imul ecx, r14d, 26
     mov byte [rbx+rcx], r12b
-    mov qword [rbx+rcx+1], 0
-    mov qword [rbx+rcx+9], 0
-    mov qword [rbx+rcx+17], 0
     pop rcx
+
+    ; === Parse remaining args on this line ===
+    push rcx                 ; save bytes_read
+    push rdi                 ; save rdi
+
+.arg_loop:
+    cmp rsi, r10            ; bounds check before every read
+    jae .args_done
+    movzx eax, byte [rsi]
+    cmp al, 10
+    je .args_done
+    cmp al, 13
+    je .args_done
+    cmp al, ';'
+    je .args_done
+    cmp al, '#'
+    je .args_done
+    cmp al, 0
+    je .args_done
+    cmp al, ' '
+    jne .arg_tok
+    inc rsi
+    jmp .arg_loop
+
+.arg_tok:
+    ; (No special 's' handling — strings are not supported in v0.2 scope)
+
+.arg_hex:
+    ; Parse 2 hex chars into al (inline, copies pattern from .hex_to_nibble)
+    xor edi, edi            ; edi = char counter
+    xor eax, eax            ; eax = result byte
+.arg_hex_l:
+    cmp rsi, r10            ; bounds check
+    jae .arg_hex_d
+    movzx ecx, byte [rsi]
+    cmp cl, '0'
+    jb .arg_hex_d
+    cmp cl, '9'
+    jbe .arg_hex_n
+    cmp cl, 'A'
+    jb .arg_hex_d
+    cmp cl, 'F'
+    jbe .arg_hex_h
+    cmp cl, 'a'
+    jb .arg_hex_d
+    cmp cl, 'f'
+    ja .arg_hex_d
+    sub cl, 'a'-10
+    jmp .arg_hex_a
+.arg_hex_n:
+    sub cl, '0'
+    jmp .arg_hex_a
+.arg_hex_h:
+    sub cl, 'A'-10
+.arg_hex_a:
+    shl eax, 4
+    movzx edx, cl
+    or eax, edx
+    inc edi
+    inc rsi
+    cmp edi, 2
+    jb .arg_hex_l
+.arg_hex_d:
+    test edi, edi
+    jz .args_done
+    ; Store al at inst_buf[r14*26 + 1 + arg_count]
+    ; CAREFUL: don't load arg_count into eax (overwrites al = parsed byte!)
+    push rcx
+    push rax
+    push rdx
+    ; Read arg_count into a safe register (r8b)
+    lea rdx, [rel arg_count]
+    movzx r8d, byte [rdx]   ; r8b = current arg_count
+    cmp r8d, 24
+    jge .skip_arg_store
+    ; Compute target: rbx + r14*26 + 1 + r8b
+    mov edx, r14d
+    imul edx, 26
+    add edx, 1
+    add edx, r8d
+    add rdx, rbx            ; rdx = inst_buf + offset
+    ; al has the parsed byte (DO NOT overwrite!)
+    mov byte [rdx], al
+    ; Increment arg_count
+    lea rdx, [rel arg_count]
+    inc byte [rdx]
+.skip_arg_store:
+    pop rdx
+    pop rax
+    pop rcx
+    jmp .arg_loop
+
+.args_done:
+    pop rdi
+    pop rcx
+    ; Reset arg_count for next instruction
+    push rax
+    xor eax, eax
+    lea rdx, [rel arg_count]
+    mov byte [rdx], al
+    pop rax
     inc r14d
 
     cmp r14d, 255
     jae .done
+    jmp .skip_line
+
+.op_skip_line:
+    ; For 0x12 (string def), skip directly to end of line
+    ; First store the opcode
+    push rcx
+    imul ecx, r14d, 26
+    mov byte [rbx+rcx], r12b
+    pop rcx
+    inc r14d
+    cmp r14d, 255
+    jae .done
+    nop
+    jmp .skip_line
 
 .skip_line:
     cmp rsi, r10
@@ -983,6 +1096,8 @@ pass2:
     je .jb
     cmp cl, 0x78
     je .jae
+    cmp cl, 0x50
+    je .loadfile
     cmp cl, 0x79
     je .jbe
     cmp cl, 0x7A
@@ -991,14 +1106,17 @@ pass2:
     je .ldb
     cmp cl, 0xA0
     je .raw
+    cmp cl, 0xA1
+    je .raw1
     cmp cl, 0xFF
     je .ret
     jmp .next
 
 .set:
-    mov rdx, r9
+    ; FIX: read slot and imm directly from inst_buf (args now parsed correctly)
+    movzx edx, byte [rbx+2]   ; imm from inst_buf[2]
     call emit_movabs_rax
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot from inst_buf[1]
     call emit_store_state
     jmp .next
 .get:
@@ -1122,6 +1240,50 @@ pass2:
 .raw:
     mov byte [rdi], r8b
     add rdi, 1
+    jmp .next
+.raw1:
+    ; 0xA1: emit 1 byte from inst_buf[1]
+    movzx eax, byte [rbx+1]
+    mov byte [rdi], al
+    add rdi, 1
+    jmp .next
+.loadfile:
+    ; 0x50: stub - just set state[slot] = state[slot+1] = 0
+    ; Real implementation would call CreateFileA, GetFileSize, VirtualAlloc, ReadFile, CloseHandle
+    xor eax, eax
+    movzx edx, byte [rbx+1]   ; slot
+    cmp edx, 16
+    jae .lf_d32
+    mov byte [rdi], 0x49
+    mov byte [rdi+1], 0x89
+    mov byte [rdi+2], 0x47
+    mov byte [rdi+3], dl
+    add rdi, 4
+    jmp .lf_store2
+.lf_d32:
+    mov byte [rdi], 0x49
+    mov byte [rdi+1], 0x89
+    mov byte [rdi+2], 0x87
+    mov dword [rdi+3], edx
+    add rdi, 7
+.lf_store2:
+    ; state[slot+1] = 0 too
+    movzx edx, byte [rbx+1]
+    inc edx
+    cmp edx, 16
+    jae .lf_d32b
+    mov byte [rdi], 0x49
+    mov byte [rdi+1], 0x89
+    mov byte [rdi+2], 0x47
+    mov byte [rdi+3], dl
+    add rdi, 4
+    jmp .next
+.lf_d32b:
+    mov byte [rdi], 0x49
+    mov byte [rdi+1], 0x89
+    mov byte [rdi+2], 0x87
+    mov dword [rdi+3], edx
+    add rdi, 7
     jmp .next
 .ret:
     call emit_ret_instr
@@ -1371,6 +1533,14 @@ write_output:
     lea r9, [rel bytes_written_pe]
     sub rsp, 0x30
     mov qword [rsp+0x20], 0   ; lpOverlapped = NULL
+    ; DEBUG: dump parse_byte_log to pe_work_buf+0x180 (preserve rcx)
+    push rcx
+    lea rsi, [rel parse_byte_log]
+    mov rdi, r12
+    add rdi, 0x180
+    mov ecx, 16
+    rep movsd
+    pop rcx
     call WriteFile
     add rsp, 0x30
 
@@ -1397,6 +1567,12 @@ output_buf:    resb 65536
 pe_work_buf:   resb 131072
 parse_debug:   resq 1
 input_fn_buf:  resb 260
+parse_byte_log:      resd 16
+parse_byte_log_idx:  resd 1
+opcode_check: resd 1
+opcode_val:   resd 1
+nl_check:     resd 1
+arg_count:           resd 1
 
 section .data
 fixup_cnt:     dd 0
@@ -1409,3 +1585,6 @@ input_buf:     times 16384 db 0
 input_fn:      db 'input.ky', 0
 output_fn:     db 'output.exe', 0
 bytes_written_pe: dd 0
+; DEBUG: parse_byte call counter in .data
+debug_call_count:    dd 0
+debug_first_8_bytes: dd 0, 0, 0, 0, 0, 0, 0, 0
