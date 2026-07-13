@@ -678,7 +678,7 @@ calc_size:
     ret
 
 .s_set:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     shl eax, 3
     cmp eax, 127
     ja .ss32
@@ -689,9 +689,9 @@ calc_size:
     ret
 
 .s_get:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst slot
     shl eax, 3
-    mov ecx, r9d
+    movzx ecx, byte [rbx+2]   ; src slot
     shl ecx, 3
     xor edx, edx
     cmp eax, 127
@@ -712,9 +712,9 @@ calc_size:
     ret
 
 .s_cmp:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; a
     shl eax, 3
-    mov ecx, r9d
+    movzx ecx, byte [rbx+2]   ; b
     shl ecx, 3
     xor edx, edx
     cmp eax, 127
@@ -736,7 +736,7 @@ calc_size:
     ret
 
 .s_incdec:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     shl eax, 3
     cmp eax, 127
     ja .idb
@@ -747,7 +747,7 @@ calc_size:
     ret
 
 .s_addsub:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     shl eax, 3
     xor edx, edx
     cmp eax, 127
@@ -757,7 +757,7 @@ calc_size:
 .asl:
     add edx, 7
 .asm:
-    mov eax, r9d
+    movsx eax, byte [rbx+2]   ; imm (signed)
     cmp eax, -128
     jl .as32
     cmp eax, 127
@@ -767,7 +767,7 @@ calc_size:
 .as32:
     add edx, 7
 .asst:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     shl eax, 3
     cmp eax, 127
     ja .astb
@@ -780,9 +780,9 @@ calc_size:
     ret
 
 .s_arith3:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst
     shl eax, 3
-    mov ecx, r9d
+    movzx ecx, byte [rbx+2]   ; src
     shl ecx, 3
     xor edx, edx
     cmp eax, 127
@@ -800,7 +800,7 @@ calc_size:
     add edx, 7
 .a3:
     add edx, 3
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst
     shl eax, 3
     cmp eax, 127
     ja .a3b
@@ -813,7 +813,7 @@ calc_size:
     ret
 
 .s_ldb:
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; src slot (ss)
     shl eax, 3
     xor edx, edx
     cmp eax, 127
@@ -824,7 +824,7 @@ calc_size:
     add edx, 7
 .lb2:
     add edx, 4
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst slot (dd)
     shl eax, 3
     cmp eax, 127
     ja .lb2b
@@ -1120,75 +1120,75 @@ pass2:
     call emit_store_state
     jmp .next
 .get:
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; src slot
     call emit_load_rax
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst slot
     call emit_store_state
     jmp .next
 .add:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     call emit_load_rax
-    mov edx, r9d
+    movzx edx, byte [rbx+2]   ; imm
     call emit_add_imm
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .sub:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     call emit_load_rax
-    mov edx, r9d
+    movzx edx, byte [rbx+2]   ; imm
     call emit_sub_imm
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .cmp:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; a
     call emit_load_rax
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; b
     call emit_load_rdx
     call emit_cmp_reg
     jmp .next
 .inc:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     call emit_load_rax
     mov edx, 1
     call emit_add_imm
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .dec:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; slot
     call emit_load_rax
     mov edx, 1
     call emit_sub_imm
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .addv:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst
     call emit_load_rax
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; src
     call emit_load_rdx
     call emit_add_reg
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .subv:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst
     call emit_load_rax
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; src
     call emit_load_rdx
     call emit_sub_reg
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .mul:
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dst
     call emit_load_rax
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; src
     call emit_load_rdx
     call emit_mul_reg
-    mov eax, r8d
+    movzx eax, byte [rbx+1]
     call emit_store_state
     jmp .next
 .call:
@@ -1230,11 +1230,11 @@ pass2:
     call emit_jcc_placeholder
     jmp .next
 .ldb:
-    mov eax, r9d
+    movzx eax, byte [rbx+2]   ; src slot (ss)
     call emit_load_rdx
-    mov r10b, r11b
+    movzx r10d, byte [rbx+3]  ; offset (oo)
     call emit_movzx_byte
-    mov eax, r8d
+    movzx eax, byte [rbx+1]   ; dest slot (dd)
     call emit_store_state
     jmp .next
 .raw:
