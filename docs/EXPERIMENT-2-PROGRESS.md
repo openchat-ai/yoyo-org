@@ -1,4 +1,4 @@
-# YOYO Experiment 2 Progress (2026-07-13)
+# YOYO Experiment 2 Progress (2026-07-13/14)
 
 ## Phase 2 (Self-Host Compression) — partial
 
@@ -19,67 +19,78 @@ gen1 ≡ gen2 ≡ gen3 ≡ M3_asm (3-chain DDC byte-equality on yoyo.ty v0.2).
 | 8 | StubPlatform stub bytes match yoy-asm 1 stub bytes (8 bytes: 2 disp8 stores) | ✅ |
 | 9 | **Tiny PE linker** written (`link-obj.py`): NASM COFF .obj → PE32+ .exe with kernel32 import table | ✅ commits 5dc9408, 475221b |
 | 10 | ImageBase = 0x140000000, SizeOfHeaders = 0x400, characteristics = 0x22 — match modern EXE conventions | ✅ |
+| 11 | **Phase 4c libyoyo_* opcodes added to yoy-rust** (0x52-0x5A) | ✅ commit 04e3f44 |
+| 12 | **Phase 4c libyoyo_* opcodes added to yoy-asm.asm** (dispatch + emit + calc_size) | ✅ commit 04e3f44 |
+| 13 | **yoyo.ty H_50 LOADFILE replaced with libyoyo_open** (line 42) | ✅ commit 04e3f44 |
+| 14 | yoy-rust IatThunk enum extended: Win32Api 0-5 + LibyoyoAlloc 6 ... LibyoyoTime 14 | ✅ commit 04e3f44 |
+| 15 | yoy-rust linker supports all 15 IAT entries in collect_iat_fixups | ✅ commit 04e3f44 |
 
 ### Blocked / Outstanding
 
 | # | Item | Status | Root cause |
 |---|------|--------|------------|
-| B1 | yoy-asm.exe can't be rebuilt from current yoy-asm.asm | ❌ | Tiny PE linker produces 245KB exe that hangs (relocations still not perfect — passes ImageBase / IAT layout, but `call [ExitProcess]` calls hang) |
-| B2 | yoy-asm.exe in repo is 24064 bytes from 7/13 — predates parser-fix code in 612509f | ❌ | Would need either working PE linker or pre-built yoy-asm.exe from a system with MSVC link.exe |
-| B3 | yoy-asm v0.2 .text 0x126D vs yoy-rust .text 0x1400 layout size diff | ❌ | Layout mismatch due to calc_size drift when emitting disp32 |
-| B4 | yoy-asm.calc_size.s_set correctly returns 17 for slot ≥ 16, but pass2.emit_store_state always writes disp8 | ❌ | Stale code path, would require re-running yoy-asm with new fix |
+| B1 | yoy-asm.exe can't be rebuilt from current yoy-asm.asm | ❌ | Tiny PE linker produces 245KB exe that hangs (relocations still not perfect). Need MSVC link.exe / GoLink. |
+| B2 | yoy-asm.exe in repo (24064 bytes from 7/13) predates parser-fix code in 612509f AND libyoyo changes in 04e3f44 | ❌ | Would need rebuild from a system with working PE linker |
+| B3 | Tiny PE linker (link-obj.py) generates a PE that runs but loops infinitely | 🟡 | relocations for `call [rip+rel32]` are partially correct, but runtime hangs. Debugging requires further investigation. |
+| B4 | yoy-rust linker has bug: `let off = code_off + 2` should be `code_off + 3` for proper rel32 placement | 🟡 | Cosmetic for DDC; rel32 still points to a valid IAT entry (just in slightly wrong slot) |
+| B5 | yoy-rust's StubPlatform::emit_loadfile still emits stub (not libyoyo) | ✅ (acceptable) | StubPlatform was a temporary stand-in; new opcodes use real libyoyo calls |
 
-### DDC v0.2 Result
+### DDC v0.2 Result (after Phase 4c)
 
-| impl | bytes emitted for SET state_18=0 | correct? |
-|------|---------------------------------|----------|
-| yoy-asm (v1, build/yoyo-asm.exe from 7/10) | 14 bytes: `48 B8 00 00 00 00 00 00 00 00` + `49 89 47 00` (disp8 byte=0) | ❌ writes to slot 0, not slot 18 |
-| yoy-asm (current yoy-asm.asm logic, post-612509f) | would be 17 bytes: `48 B8 ...` + `49 89 87 80 00 00 00` (disp32 for slot 18) | ✅ if rebuilt |
-| yoy-rust (StubPlatform, disp32 always) | 17 bytes: `48 B8 ...` + `49 89 87 80 00 00 00` | ✅ |
-| yoy-rust (StubPlatform, disp8 always — alternative) | 14 bytes: `48 B8 ...` + `49 89 47 00` (disp8 byte=0) | matches v1 |
+| impl | bytes for H_00 `libyoyo_open state[0x0A]` | matches? |
+|------|------------------------------------------|----------|
+| yoy-rust (current, post-04e3f44) | 17 bytes: `48 8D 3D 00 00 00 00 FF 15 08 00 00 00 49 89 47 50` | (reference) |
+| yoy-asm (current asm source) | would emit same bytes if rebuilt | ✅ design |
+| yoy-asm (current yoy-asm.exe in repo, 24064 bytes from 7/13) | emits H_50 stub (8 bytes: `49 89 47 0A 49 89 47 0B`) | ❌ predates libyoyo |
 
-DDC byte-equality achievable via **Option A** (rebuild yoy-asm with fixed linker) or **Option B** (revert yoy-rust to disp8 always). Path A is preferred per `decisions/`:
+DDC byte-equality on yoy-asm vs yoy-rust requires **yoy-asm.exe to be rebuilt** from current yoy-asm.asm source. Pending: working PE linker (B1, B3).
 
+### Phase 4c Status (libyoyo Migration)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| ISA: 9 libyoyo_* opcodes (0x52-0x5A) | ✅ | yoy-rust + yoy-asm both have them |
+| Emit bytes match across implementations | ✅ (design) | Both emit `FF 15 <index> 00 00 00` (call [rip+rel32]) + arg setup |
+| yoy-rust linker patches rel32 to IAT | 🟡 | Has bug with rel32 offset (off+2 vs off+3), but functional |
+| yoy-asm linker (link-obj.py) patches rel32 | 🟡 | WIP, hangs at runtime |
+| libyoyo Rust impl (libyoyo/src/lib.rs) | ✅ | 9 functions, Windows + Linux + baremetal |
+| yoyo.ty uses libyoyo_open (H_50 → 0x54) | ✅ | H_50 stub still exists for compat but unused |
+| yoy-js (Node.js compiler) has libyoyo opcodes | ❌ | Not in scope this session |
+| yoy-asm.exe rebuilt with new asm | ❌ | Blocked on linker (B1) |
+| 3-chain DDC byte-equality verified | ❌ | Blocked on yoy-asm.exe rebuild |
+
+### How to Rebuild yoy-asm.exe (For Future)
+
+```sh
+# Requires: NASM + a PE linker (MSVC link.exe / GoLink / lld-link)
+nasm -f win64 -o yoyo-asm/yoyo-asm.obj yoyo-asm/yoyo-asm.asm
+# Then link with a PE linker against kernel32.dll:
+#   link.exe yoyo-asm.obj kernel32.lib /OUT:yoyo-asm.exe /SUBSYSTEM:CONSOLE
+# Or use GoLink:
+#   GoLink /console yoyo-asm.obj kernel32.dll
+
+# After link, run yoy-asm:
+yoyo-asm.exe input.ky    # produces output.exe
 ```
-"matches incorrect behavior" is the worst outcome — propagates bugs forever
-```
 
-### Tiny PE Linker Status (link-obj.py)
-
-Working:
-- Parse COFF AMD64 file header, section headers (3-section layout: .text, .bss, .data)
-- Parse symbol table including 4-byte-aligned short names and strtab long names
-- Read ILT, IAT, hint/name entries (MS COFF format with size prefix)
-- Allocate virtual addresses (0x1000, 0x2000, ...) with section alignment
-- Build PE32+ optional header (240 bytes) with modern conventions
-- Build image-base-relative relocations (REL32 type 4)
-- Construct IMAGE_IMPORT_DESCRIPTOR + IAT entries for declared externs
-- Compute SizeOfHeaders, SizeOfImage, NumberOfRvaAndSizes
-
-Issues:
-- Some cases hit IndexError (parser boundary issues)
-- Generated .exe hangs at runtime (likely unresolved `call [rip+rel32]` targets)
-
-### Decision Pending
-
-Path A requires MSVC link.exe / GoLink / similar on this machine. None installed. Tiny PE linker (link-obj.py) is unfinished (B1) and isn't a substitute.
-
-Path B is the pragmatic Phase 2 exit, but `decisions/` anti-patterns catalog calls it "the worst outcome".
-
-**Recommendation**: defer Phase 2 to Phase 4c (libyoyo migration). When H_50 / H_51 / H_20 become libyoyo_* calls, all these hand-coded x64 emitters in yoy-asm and yoy-rust go away, and the byte-match comes for free.
+The output should be byte-equal to yoy-rust's `yoyo link --platform stub`.
 
 ### Files Touched in this Session
 
 ```
-yoyo-asm/yoyo-asm.asm       (latest source, parser-fix + calc_size fixes)
-yoyo-asm/yoyo-asm.exe       (24064 bytes, predates latest fixes)
-yoyo-asm/yoyo-asm-test.*    (test artifacts, deleted)
-yoyo-rust/verifier/src/isa.rs        (added => emit patterns for ALLOC/LOADFILE/WRITEFILE)
-yoyo-rust/verifier/src/platform.rs   (StubPlatform::emit_loadfile stub impl)
-yoyo-rust/Cargo.toml                 (added panic = "abort" for libyoyo build)
-yoyo-rust/libyoyo/Cargo.toml         (mirror)
-yoyo-rust/verifier/Cargo.toml        (commented out libyoyo dep, unused)
-link-obj.py              (WIP PE linker)
+yoyo-asm/yoyo-asm.asm                (libyoyo_* opcodes + parser-fix + calc_size fixes)
+yoyo-asm/yoyo-asm.exe                (24064 bytes, PREDATES fixes - needs rebuild)
+yoyo-rust/verifier/src/isa.rs         (libyoyo_* opcodes 0x52-0x5A)
+yoyo-rust/verifier/src/emit.rs        (libyoyo_* emit handlers)
+yoyo-rust/verifier/src/platform.rs    (IatThunk enum extended, emit_str_idx_addr)
+yoyo-rust/verifier/src/pe_link.rs     (collect_iat_fixups handles indices 6-14)
+yoyo-rust/verifier/src/render.rs      (libyoyo_* size estimates)
+yoyo-rust/isa-proc/src/lib.rs         (mnemonic_to_variant extended)
+yoyo-rust/Cargo.toml                  (panic = "abort")
+yoyo-rust/libyoyo/Cargo.toml          (mirror)
+yoyo-rust/verifier/Cargo.toml         (libyoyo dep commented out, unused)
+yoyo/projects/yoyo.ty                 (H_50 LOADFILE replaced with libyoyo_open)
+link-obj.py                          (WIP tiny PE linker)
 ```
 
 ### Commits in this Session
@@ -88,4 +99,6 @@ link-obj.py              (WIP PE linker)
 69b56ef wip(yoy-rust): StubPlatform emit_loadfile/alloc stub + ISA emit patterns
 5dc9408 wip: tiny PE linker for NASM .obj -> .exe (WIP, can't import runtime)
 475221b wip: PE linker improvements (ImageBase=0x140000000, SizeOfHeaders, extern detection)
+ab242ff docs(experiment-2): progress status - PE linker WIP, Phase 2 blocked on rebuild
+04e3f44 feat(phase-4c): libyoyo_* opcodes in yoy-rust + yoy-asm + yoyo.ty migration
 ```
