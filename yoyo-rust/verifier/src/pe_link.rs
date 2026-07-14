@@ -59,9 +59,9 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
         if disp32 < i32::MIN as i64 || disp32 > i32::MAX as i64 {
             return Err(format!("IAT displacement out of range: {}", disp32));
         }
-        let off = code_off as usize + 3; // bytes 3..7 of FF 15 00 00000000 (rel32 is at offset 3, not 2)
-        // The byte at offset+2 is the IAT index (which the linker preserves as a hint).
-        // The rel32 (offsets 3-6) is what we need to patch.
+        let off = code_off as usize + 2; // bytes 2..6 of FF 15 00000000 (rel32 at offset 2)
+        // The byte at offset+2 is BOTH the IAT index hint AND the first byte of rel32.
+        // The patch overwrites it (as disp32[0]).
         code[off..off + 4].copy_from_slice(&(disp32 as i32).to_le_bytes());
     }
 

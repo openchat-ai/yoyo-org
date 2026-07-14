@@ -99,11 +99,12 @@ pub fn store_state<const N: usize>(buf: &mut FixedBuf<N>, slot: u8, src: Reg) ->
     buf.push(0x89)?;
     if offset <= 127 {
         buf.push(modrm(1, src.low3(), STATE_BASE.low3()))?;
-        buf.push(offset as u8)
+        buf.push(offset as u8)?;
     } else {
         buf.push(modrm(2, src.low3(), STATE_BASE.low3()))?;
-        buf.extend(&(offset as u32).to_le_bytes())
+        buf.extend(&(offset as u32).to_le_bytes())?;
     }
+    Ok(())
 }
 
 pub fn call_rel32<const N: usize>(buf: &mut FixedBuf<N>, offset: i32) -> IsaResult<()> {
@@ -367,6 +368,18 @@ mod tests {
         let mut buf: FixedBuf<4> = FixedBuf::new();
         ret(&mut buf).unwrap();
         assert_eq!(buf.as_slice(), &[0xC3]);
+    }
+
+    #[test]
+    fn test_store_state_rex_disp8() {
+        // Each SET state[slot]=val emit must start with REX.WB (0x49)
+        // because RAX -> [r15+disp8] needs both W (64-bit) and B (R15 is in [r8-r15])
+        for slot in [0x0Au8, 0x0B, 0x0E, 0x0F, 0x10, 0x18, 0x1F].iter() {
+            let mut buf: FixedBuf<16> = FixedBuf::new();
+            store_state(&mut buf, *slot, Reg::Rax).unwrap();
+            let bytes = buf.as_slice();
+            assert_eq!(bytes[0], 0x49, "store_state(slot=0x{:02X}) missing REX.WB prefix, got {:02X?}", slot, bytes);
+        }
     }
 
     #[test]
