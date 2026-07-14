@@ -6,6 +6,7 @@ Usage: python link-obj.py input.obj output.exe
 """
 import struct
 import sys
+import sys as _always_imported_sys
 
 # === COFF constants ===
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
@@ -16,6 +17,7 @@ IMAGE_SCN_MEM_EXECUTE = 0x20000000
 IMAGE_SCN_MEM_READ = 0x40000000
 IMAGE_SCN_MEM_WRITE = 0x80000000
 
+REL_BASED_AMD64_REL32 = 4
 REL_BASED_DIR64 = 1
 
 class Section:
@@ -71,6 +73,8 @@ def parse_obj(path):
     string_tab_off = sym_off + num_syms * 18
 
     def read_string_at(off):
+        # MS COFF: offset is from start of string table (which begins with 4-byte size).
+        # For typical names stored at strtab[4..], off is the offset FROM the start.
         if off >= len(data) - string_tab_off:
             return ''
         end = string_tab_off + off
@@ -85,8 +89,9 @@ def parse_obj(path):
         raw = data[b:b+18]
         name_bytes = raw[0:8]
         value, sect_num, sym_type, storage, aux_count = struct.unpack_from('<IHHBB', raw, 8)
-        if name_bytes[4:8] == b'\x00\x00\x00\x00':
-            offset = struct.unpack_from('<I', name_bytes, 0)[0]
+        if name_bytes[0:4] == b'\x00\x00\x00\x00':
+            # Long name: bytes 4-7 are string-table offset
+            offset = struct.unpack_from('<I', name_bytes, 4)[0]
             name = read_string_at(offset)
         else:
             name = name_bytes.rstrip(b'\x00').decode('ascii', errors='replace')
@@ -96,21 +101,38 @@ def parse_obj(path):
 
     return sections, symbols, data
 
-def resolve_symbol(symbols, sections, sym_idx):
+def resolve_symbol(symbols, sections, sym_idx, extern_iat_rvas):
     if sym_idx >= len(symbols):
         return 0
     sym = symbols[sym_idx]
     if sym.sect_num > 0 and sym.sect_num <= len(sections):
         sec = sections[sym.sect_num - 1]
         return sec.virt_addr + sym.value
-    return 0  # external symbol; resolved at runtime via IAT
+    # External symbol — return its IAT RVA
+    if sym_idx in extern_iat_rvas:
+        return extern_iat_rvas[sym_idx]
+    return 0
 
-def build_pe(sections_in, symbols, image_base=0x400000):
+def build_pe(sections_in, symbols, image_base=0x140000000):
     """Build PE32+ image with kernel32 import table for yoy-asm."""
-    # External imports
-    EXTERNS = ["CreateFileA", "ReadFile", "WriteFile", "CloseHandle", "ExitProcess", "GetCommandLineA"]
-
     sections = sections_in
+
+    # === Collect extern symbols (only those referenced by relocations, to avoid false positives like labels) ===
+    extern_sym_set = set()
+    for sec in sections:
+        for (rel_offset, sym_idx, rtype) in sec.relocs:
+            sym = symbols[sym_idx]
+            # Include only extern symbols: storage==2 (IMAGE_SYM_CLASS_EXTERNAL) AND section==0 (undefined)
+            # Also filter by name: must look like a Windows API name (no '.', '?', ' ', etc.)
+            if sym.sect_num == 0 and sym.storage == 2 and sym.name and all(c.isalnum() or c == '_' for c in sym.name):
+                extern_sym_set.add(sym_idx)
+    # Sort by sym index for deterministic ordering
+    EXTERNS = sorted([(idx, symbols[idx].name) for idx in extern_sym_set])  # list of (idx, name)
+    extern_names = [name for idx, name in EXTERNS]
+    _always_imported_sys.stderr.write(f"DEBUG: {len(EXTERNS)} externs:\n")
+    for idx, name in EXTERNS:
+        _always_imported_sys.stderr.write(f"  [{idx}]: '{name}'\n")
+    _always_imported_sys.stderr.flush()
 
     # Compute virtual addresses: .text at 0x1000
     section_align = 0x1000
@@ -144,13 +166,15 @@ def build_pe(sections_in, symbols, image_base=0x400000):
     idl_size += (n_funcs + 1) * 8  # ILT
     idl_size += (n_funcs + 1) * 8  # IAT
     dll_name = b'kernel32.dll\x00'
-    hint_name_block = b''.join(
-        struct.pack('<H', 0) + name.encode('ascii') + b'\x00'
-        for name in EXTERNS
-    )
-    # Pad hint-name block to even
-    if len(hint_name_block) % 2:
-        hint_name_block += b'\x00'
+    # Build hint-name block: each entry = 2-byte hint + name + null + pad to even
+    hint_name_parts = []
+    for name in extern_names:
+        entry = struct.pack('<H', 0) + name.encode('ascii') + b'\x00'
+        # Pad each entry to even length
+        if len(entry) % 2:
+            entry += b'\x00'
+        hint_name_parts.append(entry)
+    hint_name_block = b''.join(hint_name_parts)
     idl_size += len(dll_name) + len(hint_name_block)
 
     # Allocate .idata section after .data/.bss
@@ -178,9 +202,14 @@ def build_pe(sections_in, symbols, image_base=0x400000):
     # Build IAT/ILT: each entry is a 64-bit RVA, terminate with 0
     # Use ordinal-style: not used here. We use hint/name RVAs.
     # Each thunk = hint_name_off + RVA-of-hint-name
-    for i, name in enumerate(EXTERNS):
-        ih_off = sum(len(EXTERNS[j].encode('ascii')) + 3 for j in range(i))  # cumulative offset within hint block
-        # ih_off needs adjustment for 2-byte hint prefix
+    # Since we already padded each entry to even, compute offset by summing padded sizes
+    for i, name in enumerate(extern_names):
+        ih_off = 0
+        for j in range(i):
+            entry_size = 2 + len(extern_names[j].encode('ascii')) + 1  # 2 hint + name + null
+            if entry_size % 2:
+                entry_size += 1  # pad to even
+            ih_off += entry_size
         full_hint_off = hint_name_off + ih_off
         thunk_rva = idata_va + full_hint_off
         struct.pack_into('<Q', idata_buf, ilt_off + i * 8, thunk_rva)
@@ -199,6 +228,19 @@ def build_pe(sections_in, symbols, image_base=0x400000):
     # Hint/Name block
     idata_buf[hint_name_off:hint_name_off+len(hint_name_block)] = hint_name_block
 
+    # === extern_list already collected above; use EXTERNS (which is sorted list of (idx, name)) ===
+    extern_list = EXTERNS
+    sys.stderr.write(f"DEBUG: {len(extern_sym_set)} externs: {sorted(extern_sym_set)}\n")
+    for idx in sorted(extern_sym_set):
+        sys.stderr.write(f"  extern [{idx}]: {symbols[idx].name}\n")
+    sys.stderr.flush()
+
+    # Build IAT entries: 8 bytes each
+    # IAT RVA = idata_va + iat_off + i * 8
+    extern_iat_rvas = {}
+    for i, (sym_idx, name) in enumerate(EXTERNS):
+        extern_iat_rvas[sym_idx] = idata_va + iat_off + i * 8
+
     # === Headers ===
     pe_hdr_offset = 0x80
     num_sections = len(sections) + 1  # +1 for .idata
@@ -206,6 +248,8 @@ def build_pe(sections_in, symbols, image_base=0x400000):
 
     headers_size = pe_hdr_offset + opt_hdr_size + num_sections * 40
     headers_size = ((headers_size + file_align - 1) // file_align) * file_align
+    if headers_size < 0x400:
+        headers_size = 0x400  # minimum SizeOfHeaders per MS docs
 
     # Set section raw pointers
     cur_raw = headers_size
@@ -232,11 +276,10 @@ def build_pe(sections_in, symbols, image_base=0x400000):
 
     # === Build out bytes ===
     out = bytearray(size_of_image)
-    import sys
-    sys.stderr.write(f"DEBUG: size_of_image=0x{size_of_image:X} idata_va=0x{idata_va:X} idata_raw_size=0x{idata_raw_size:X} idl_size={idl_size}\n")
-    sys.stderr.write(f"DEBUG: n_funcs={n_funcs} ilt_off={ilt_off} iat_off={iat_off} dll_name_off={dll_name_off} hint_name_off={hint_name_off}\n")
-    sys.stderr.write(f"DEBUG: len(idata_buf)={len(idata_buf)} n_zero_byte={sum(1 for b in idata_buf if b == 0)}\n")
-    sys.stderr.flush()
+    _always_imported_sys.stderr.write(f"DEBUG: size_of_image=0x{size_of_image:X} idata_va=0x{idata_va:X} idata_raw_size=0x{idata_raw_size:X} idl_size={idl_size}\n")
+    _always_imported_sys.stderr.write(f"DEBUG: n_funcs={n_funcs} ilt_off={ilt_off} iat_off={iat_off} dll_name_off={dll_name_off} hint_name_off={hint_name_off}\n")
+    _always_imported_sys.stderr.write(f"DEBUG: len(idata_buf)={len(idata_buf)} n_zero_byte={sum(1 for b in idata_buf if b == 0)}\n")
+    _always_imported_sys.stderr.flush()
 
     # MZ header
     out[0:2] = b'MZ'
@@ -252,7 +295,7 @@ def build_pe(sections_in, symbols, image_base=0x400000):
         num_sections,
         0, 0, 0,
         opt_hdr_size,
-        0x2102,  # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE | DEBUG_STRIPPED | LINE_NUMS_STRIPPED | LOCAL_SYMS_STRIPPED
+        0x22,  # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
     )
 
     # IMAGE_OPTIONAL_HEADER (PE32+)
@@ -338,9 +381,15 @@ def build_pe(sections_in, symbols, image_base=0x400000):
         for (rel_offset, sym_idx, rtype) in sec.relocs:
             if rtype == REL_BASED_DIR64:
                 abs_vaddr = sec.virt_addr + rel_offset
-                symbol_addr = resolve_symbol(symbols, sections, sym_idx)
+                symbol_addr = resolve_symbol(symbols, sections, sym_idx, extern_iat_rvas)
                 target = image_base + symbol_addr
                 struct.pack_into('<Q', mem_view, abs_vaddr, target)
+            elif rtype == REL_BASED_AMD64_REL32:
+                abs_vaddr = sec.virt_addr + rel_offset
+                symbol_addr = resolve_symbol(symbols, sections, sym_idx, extern_iat_rvas)
+                rel_value = symbol_addr - (abs_vaddr + 4)
+                cur = struct.unpack_from('<i', mem_view, abs_vaddr)[0]
+                struct.pack_into('<i', mem_view, abs_vaddr, cur + rel_value)
 
     # === Copy from memory view to file (at raw_ptr positions) ===
     for sec in all_sections:
