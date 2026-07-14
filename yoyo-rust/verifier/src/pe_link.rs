@@ -249,6 +249,15 @@ fn collect_iat_fixups(code: &[u8], code_base: u32) -> Vec<(u32, Win32Api)> {
                 3 => Win32Api::ReadFile,
                 4 => Win32Api::WriteFile,
                 5 => Win32Api::CloseHandle,
+                6 => Win32Api::LibyoyoAlloc,
+                7 => Win32Api::LibyoyoFree,
+                8 => Win32Api::LibyoyoOpen,
+                9 => Win32Api::LibyoyoRead,
+                10 => Win32Api::LibyoyoWrite,
+                11 => Win32Api::LibyoyoClose,
+                12 => Win32Api::LibyoyoExit,
+                13 => Win32Api::LibyoyoPrint,
+                14 => Win32Api::LibyoyoTime,
                 _ => return Vec::new(),
             };
             fixups.push((code_base + i as u32, api));

@@ -1,5 +1,5 @@
 use crate::isa::TirOp;
-use crate::platform::{Platform, PlatformKind};
+use crate::platform::{emit_str_idx_addr, IatThunk, Platform, PlatformKind, Win32Api};
 use crate::primitives::*;
 use crate::tir::TirInst;
 use crate::types::{FixedBuf, Reg};
@@ -207,6 +207,71 @@ fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u
             }
             TirOp::WriteFile { id, str_idx, sz } => {
                 platform.emit_writefile(&mut buf, *id as u16, *str_idx as u8, *sz as u16).unwrap();
+            }
+
+            // ── libyoyo_* calls (Phase 4c) ──
+            // Each emits: load args into rdi/rsi/rdx, then call [rip+rel32]
+            // where rel32 points to an IAT slot for the libyoyo_* function.
+            TirOp::LibyoyoAlloc { slot, sz } => {
+                // libyoyo_alloc(sz) -> rax
+                // rdi = sz
+                movabs(&mut buf, Reg::Rdi, *sz).unwrap();
+                // call [libyoyo_alloc]
+                IatThunk::LibyoyoAlloc.emit_call(&mut buf).unwrap();
+                // store rax to state[slot]
+                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+            }
+            TirOp::LibyoyoFree { slot } => {
+                // libyoyo_free(state[slot])  → rdi = state[slot]
+                load_state(&mut buf, *slot as u8, Reg::Rdi).unwrap();
+                IatThunk::LibyoyoFree.emit_call(&mut buf).unwrap();
+            }
+            TirOp::LibyoyoOpen { slot, str_idx } => {
+                // libyoyo_open(path_str_idx) -> rax = fd
+                // rdi = pointer to NUL-terminated path string at str_idx
+                emit_str_idx_addr(&mut buf, *str_idx).unwrap();
+                IatThunk::LibyoyoOpen.emit_call(&mut buf).unwrap();
+                // store rax to state[slot]
+                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+            }
+            TirOp::LibyoyoRead { slot, fd, sz } => {
+                // libyoyo_read(state[fd], state[slot], sz)
+                // rdi = state[fd], rsi = state[slot], rdx = sz
+                load_state(&mut buf, *fd as u8, Reg::Rdi).unwrap();
+                load_state(&mut buf, *slot as u8, Reg::Rsi).unwrap();
+                movabs(&mut buf, Reg::Rdx, *sz as u64).unwrap();
+                IatThunk::LibyoyoRead.emit_call(&mut buf).unwrap();
+                // state[slot+1] = bytes read (return value)
+                store_state(&mut buf, (*slot + 1) as u8, Reg::Rax).unwrap();
+            }
+            TirOp::LibyoyoWrite { fd, slot, sz } => {
+                // libyoyo_write(state[fd], state[slot], sz)
+                load_state(&mut buf, *fd as u8, Reg::Rdi).unwrap();
+                load_state(&mut buf, *slot as u8, Reg::Rsi).unwrap();
+                movabs(&mut buf, Reg::Rdx, *sz as u64).unwrap();
+                IatThunk::LibyoyoWrite.emit_call(&mut buf).unwrap();
+            }
+            TirOp::LibyoyoClose { fd } => {
+                // libyoyo_close(state[fd])
+                load_state(&mut buf, *fd as u8, Reg::Rdi).unwrap();
+                IatThunk::LibyoyoClose.emit_call(&mut buf).unwrap();
+            }
+            TirOp::LibyoyoExit { slot } => {
+                // libyoyo_exit(state[slot])  - never returns
+                load_state(&mut buf, *slot as u8, Reg::Rdi).unwrap();
+                IatThunk::LibyoyoExit.emit_call(&mut buf).unwrap();
+                // unreachable; emit ret for safety
+                ret(&mut buf).unwrap();
+            }
+            TirOp::LibyoyoPrint { slot } => {
+                // libyoyo_print(state[slot])  - string at state[slot]
+                load_state(&mut buf, *slot as u8, Reg::Rdi).unwrap();
+                IatThunk::LibyoyoPrint.emit_call(&mut buf).unwrap();
+            }
+            TirOp::LibyoyoTime { slot } => {
+                // libyoyo_time() -> rax
+                IatThunk::LibyoyoTime.emit_call(&mut buf).unwrap();
+                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
             }
 
             // ── HandlerStart (already handled above) ──

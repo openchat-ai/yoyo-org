@@ -146,6 +146,15 @@ fn tir_op_to_string(op: &TirOp) -> String {
         }
         TirOp::RawByte { byte } => format!("raw_byte 0x{:02X}", byte),
         TirOp::RawBytes { bytes } => format!("raw_bytes count={}", bytes),
+        TirOp::LibyoyoAlloc { slot, sz } => format!("libyoyo_alloc state[0x{:02X}], 0x{:X}", slot, sz),
+        TirOp::LibyoyoFree { slot } => format!("libyoyo_free state[0x{:02X}]", slot),
+        TirOp::LibyoyoOpen { slot, str_idx } => format!("libyoyo_open state[0x{:02X}], str_idx={}", slot, str_idx),
+        TirOp::LibyoyoRead { slot, fd, sz } => format!("libyoyo_read state[0x{:02X}], fd=state[0x{:02X}], sz=0x{:X}", slot, fd, sz),
+        TirOp::LibyoyoWrite { fd, slot, sz } => format!("libyoyo_write fd=state[0x{:02X}], state[0x{:02X}], sz=0x{:X}", fd, slot, sz),
+        TirOp::LibyoyoClose { fd } => format!("libyoyo_close fd=state[0x{:02X}]", fd),
+        TirOp::LibyoyoExit { slot } => format!("libyoyo_exit state[0x{:02X}]", slot),
+        TirOp::LibyoyoPrint { slot } => format!("libyoyo_print state[0x{:02X}]", slot),
+        TirOp::LibyoyoTime { slot } => format!("libyoyo_time state[0x{:02X}]", slot),
     }
 }
 
@@ -185,6 +194,24 @@ fn chunks_for_source_line(line_tirs: &[&TirInst]) -> usize {
             TirOp::WriteFile { .. } => 20,
             TirOp::RawByte { .. } => 1,
             TirOp::RawBytes { .. } => 1,
+            // libyoyo_* call sizes (Phase 4c):
+            // alloc: movabs rdi imm(10) + call_iat_thunk(6) + store_state(7) = 23
+            // free/close: load_state(7) + call_iat_thunk(6) = 13
+            // open: lea(7) + call_iat_thunk(6) + store_state(7) = 20
+            // read: load_state(7) + load_state(7) + movabs(10) + call_iat_thunk(6) + store_state(7) = 37
+            // write: load_state(7) + load_state(7) + movabs(10) + call_iat_thunk(6) = 30
+            // exit: load_state(7) + call_iat_thunk(6) + ret(1) = 14
+            // print: load_state(7) + call_iat_thunk(6) = 13
+            // time: call_iat_thunk(6) + store_state(7) = 13
+            TirOp::LibyoyoAlloc { .. } => 23,
+            TirOp::LibyoyoFree { .. } => 13,
+            TirOp::LibyoyoOpen { .. } => 20,
+            TirOp::LibyoyoRead { .. } => 37,
+            TirOp::LibyoyoWrite { .. } => 30,
+            TirOp::LibyoyoClose { .. } => 13,
+            TirOp::LibyoyoExit { .. } => 14,
+            TirOp::LibyoyoPrint { .. } => 13,
+            TirOp::LibyoyoTime { .. } => 13,
         };
     }
     count

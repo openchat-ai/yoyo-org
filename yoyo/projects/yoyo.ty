@@ -39,17 +39,14 @@
 ; H_00: ENTRY — load file, init, dispatch to scanner
 ; -----------------------------------------------------------------------------
 00 00 40 00
-  00 00 50 0A 00                           ; H_50: load input.ky → state_0A/0B
+  00 00 54 0A 00                           ; libyoyo_open state_0A, str_idx=0 (input.ky)
   00 00 30 0e 00                           ; code_offset = 0
   00 00 30 10 00                           ; scanner_state = READY (Trit 0)
   00 00 41 01                             ; H_01: main scanner loop
   00 00 ff
 
 ; -----------------------------------------------------------------------------
-; H_50: LOAD_FILE — read input.ky into state_0A (ptr) / 0B (size)
-;
-;   For Experiment 1, the input is a hardcoded test pattern
-;   (later experiments replace with real file I/O via syscall)
+; H_50: LOAD_FILE (deprecated by libyoyo_open above, kept for reference)
 ; -----------------------------------------------------------------------------
 00 00 40 50
   00 00 30 0A 00                           ; state_0A = input_ptr (placeholder)

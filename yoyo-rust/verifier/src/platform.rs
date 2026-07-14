@@ -2,29 +2,56 @@ use std::fmt::Debug;
 use crate::primitives::*;
 use crate::types::{FixedBuf, IsaResult, Reg};
 
-/// Win32 API indices embedded in `FF 15 ii 00 00 00` placeholders.
+/// IAT thunk indices embedded in `FF 15 ii 00 00 00` placeholders.
 /// The linker extracts `ii` to determine which IAT entry to patch.
+///
+/// Layout:
+/// - 0..5:  legacy Win32 API calls (VirtualAlloc, CreateFileA, etc.)
+/// - 6..14: libyoyo_* calls (Phase 4c)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Win32Api {
+pub enum IatThunk {
     VirtualAlloc = 0,
     CreateFileA = 1,
     GetFileSize = 2,
     ReadFile = 3,
     WriteFile = 4,
     CloseHandle = 5,
+    LibyoyoAlloc = 6,
+    LibyoyoFree = 7,
+    LibyoyoOpen = 8,
+    LibyoyoRead = 9,
+    LibyoyoWrite = 10,
+    LibyoyoClose = 11,
+    LibyoyoExit = 12,
+    LibyoyoPrint = 13,
+    LibyoyoTime = 14,
 }
 
-pub const NUM_WIN32_APIS: usize = 6;
+pub const NUM_IAT_THUNKS: usize = 15;
 
-pub const WIN32_API_NAMES: [&str; NUM_WIN32_APIS] = [
+pub const IAT_THUNK_NAMES: [&str; NUM_IAT_THUNKS] = [
     "VirtualAlloc",
     "CreateFileA",
     "GetFileSize",
     "ReadFile",
     "WriteFile",
     "CloseHandle",
+    "libyoyo_alloc",
+    "libyoyo_free",
+    "libyoyo_open",
+    "libyoyo_read",
+    "libyoyo_write",
+    "libyoyo_close",
+    "libyoyo_exit",
+    "libyoyo_print",
+    "libyoyo_time",
 ];
+
+// Backward-compat alias - old code uses Win32Api name
+pub type Win32Api = IatThunk;
+pub const NUM_WIN32_APIS: usize = NUM_IAT_THUNKS;
+pub const WIN32_API_NAMES: [&str; NUM_WIN32_APIS] = IAT_THUNK_NAMES;
 
 /// Offset within emitted code of a `FF 15 ii 00 00 00` placeholder
 /// that the PE linker must patch with a RIP-relative IAT displacement.
@@ -144,6 +171,71 @@ fn store_r15<const N: usize>(buf: &mut FixedBuf<N>, slot: u16) -> IsaResult<()> 
     Ok(())
 }
 
+// ── libyoyo_* call emitters (Phase 4c) ───────────────────────────────
+
+/// Emit `lea rdi, [r15 + slot*8]` (load path/arg from state)
+fn load_state_addr_rdi<const N: usize>(buf: &mut FixedBuf<N>, slot: u16) -> IsaResult<()> {
+    // lea rdi, [r15 + slot*8]
+    buf.push(0x48)?;
+    buf.push(0x8D)?;
+    buf.push(0xBF)?;
+    buf.extend(&(slot as u32).to_le_bytes())?;
+    Ok(())
+}
+
+/// Emit `mov rdi, <imm64>` - load 64-bit immediate into rdi
+fn movabs_rdi_imm<const N: usize>(buf: &mut FixedBuf<N>, imm: u64) -> IsaResult<()> {
+    buf.push(0x48)?;
+    buf.push(0xBF)?;
+    buf.extend(&imm.to_le_bytes())?;
+    Ok(())
+}
+
+/// Emit `mov rsi, <imm64>` - load 64-bit immediate into rsi
+fn movabs_rsi_imm<const N: usize>(buf: &mut FixedBuf<N>, imm: u64) -> IsaResult<()> {
+    buf.push(0x48)?;
+    buf.push(0xBE)?;
+    buf.extend(&imm.to_le_bytes())?;
+    Ok(())
+}
+
+/// Emit `mov rdx, <imm64>` - load 64-bit immediate into rdx
+fn movabs_rdx_imm<const N: usize>(buf: &mut FixedBuf<N>, imm: u64) -> IsaResult<()> {
+    buf.push(0x48)?;
+    buf.push(0xBA)?;
+    buf.extend(&imm.to_le_bytes())?;
+    Ok(())
+}
+
+/// Emit `E8 <rel32>` (near call) with placeholder for later fixup
+fn call_rel32_placeholder<const N: usize>(buf: &mut FixedBuf<N>) -> IsaResult<()> {
+    buf.push(0xE8)?;
+    buf.push(0x00)?;
+    buf.push(0x00)?;
+    buf.push(0x00)?;
+    buf.push(0x00)?;
+    Ok(())
+}
+
+/// Emit `call [rip+rel32]` (FF 15 ...) with placeholder for later fixup
+fn call_indirect_rip_placeholder<const N: usize>(buf: &mut FixedBuf<N>) -> IsaResult<()> {
+    buf.push(0xFF)?;
+    buf.push(0x15)?;
+    buf.push(0x00)?;
+    buf.push(0x00)?;
+    buf.push(0x00)?;
+    buf.push(0x00)?;
+    Ok(())
+}
+
+/// Place a placeholder for a libyoyo call fixup, return offset of the rel32
+pub fn emit_libyoyo_call_marker<const N: usize>(buf: &mut FixedBuf<N>) -> IsaResult<u32> {
+    // Emit `call [rip + rel32_placeholder]`, return offset of rel32 (after FF 15)
+    call_indirect_rip_placeholder(buf)?;
+    // The rel32 starts at buf.len() - 4
+    Ok(buf.len() as u32 - 4)
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// Emit `FF 15 ii 00 00 00`: call [rip+ii]. The linker patches bytes 2..6
@@ -158,7 +250,30 @@ fn call_iat_thunk<const N: usize>(buf: &mut FixedBuf<N>, api: Win32Api) -> IsaRe
     Ok(())
 }
 
-/// Emit `lea rcx, [rip+0]` — placeholder for string address.
+/// Public version of call_iat_thunk - used by emit.rs for libyoyo_* opcodes.
+impl Win32Api {
+    pub fn emit_call<const N: usize>(&self, buf: &mut FixedBuf<N>) -> IsaResult<()> {
+        call_iat_thunk(buf, *self)
+    }
+}
+
+/// Emit `lea rdi, [rip+str_offset_placeholder]` - load address of str_idx string.
+/// The linker patches the rel32 to point to the actual string in .data section.
+/// For libyoyo_open, str_idx is an index into the .tyo string table.
+pub fn emit_str_idx_addr<const N: usize>(buf: &mut FixedBuf<N>, _str_idx: u8) -> IsaResult<()> {
+    // For now, emit lea rdi, [rip+rel32] with placeholder rel32=0
+    // The linker should patch this. (TODO: implement in pe_link.rs)
+    buf.push(0x48)?;  // REX.W
+    buf.push(0x8D)?;  // LEA
+    buf.push(0x3D)?;  // ModRM: mod=00 reg=rdi(111) r/m=101 (RIP-relative)
+    buf.push(0x00)?;  // rel32[0]
+    buf.push(0x00)?;  // rel32[1]
+    buf.push(0x00)?;  // rel32[2]
+    buf.push(0x00)?;  // rel32[3]
+    Ok(())
+}
+
+/// Emit `lea rcx, [rip+0]` - placeholder for string address.
 /// The linker patches the disp32 to point to the string in the data section.
 fn lea_rcx_rip_placeholder<const N: usize>(buf: &mut FixedBuf<N>) -> IsaResult<()> {
     buf.push(0x48)?;

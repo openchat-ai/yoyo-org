@@ -41,9 +41,20 @@ isaproc::isa! {
 0x00A0 RAW_BYTE  byte  => raw_byte byte   ; emit single byte literal
 0x00A1 RAW_BYTES bytes => raw_bytes bytes ; emit block of literal bytes
 
-// ── Syscall / Complex ───────────────────────────────────────────────
-0x0020 ALLOC slot sz      => emit_alloc slot sz     ; VirtualAlloc (via platform)
-0x0050 LOADFILE slot str_idx => emit_loadfile slot str_idx  ; ReadFile (via platform)
-0x0051 WRITEFILE id str_idx sz => emit_writefile id str_idx sz  ; CreateFile+WriteFile+Close (via platform)
+// ── libyoyo_* Calls (Phase 4c) ─────────────────────────────────────
+0x0052 LIBYOYO_ALLOC slot sz      => emit_libyoyo_alloc slot sz
+0x0053 LIBYOYO_FREE slot          => emit_libyoyo_free slot
+0x0054 LIBYOYO_OPEN slot str_idx  => emit_libyoyo_open slot str_idx
+0x0055 LIBYOYO_READ slot fd sz    => emit_libyoyo_read slot fd sz
+0x0056 LIBYOYO_WRITE fd slot sz   => emit_libyoyo_write fd slot sz
+0x0057 LIBYOYO_CLOSE fd           => emit_libyoyo_close fd
+0x0058 LIBYOYO_EXIT slot          => emit_libyoyo_exit slot
+0x0059 LIBYOYO_PRINT slot         => emit_libyoyo_print slot
+0x005A LIBYOYO_TIME slot          => emit_libyoyo_time slot
+
+// ── Legacy Syscall / Complex (deprecated by libyoyo_* above) ───────────
+0x0020 ALLOC slot sz      => emit_alloc slot sz     ; VirtualAlloc (via platform) - deprecated
+0x0050 LOADFILE slot str_idx => emit_loadfile slot str_idx  ; ReadFile (via platform) - deprecated
+0x0051 WRITEFILE id str_idx sz => emit_writefile id str_idx sz  ; CreateFile+WriteFile+Close (via platform) - deprecated
 
 } // isa!
