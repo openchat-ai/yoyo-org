@@ -118,6 +118,56 @@ function createWinEmitContext(prog, opts = {}) {
     ci('KERNEL32.dll.VirtualAlloc'); stPut(slot, RAX);
   }
 
+  // libyoyo_* call emitters (Phase 4c).
+  // Each emits: load arg(s) into rdi/rsi/rdx, then call [libyoyo_*]
+  // (via Win32 IAT-style indirection). The linker places a placeholder
+  // (FF 15 <index> 00 00 00) that gets patched with the IAT RVA.
+  function emitLibyoyoAlloc(slot, size) {
+    E.mov_ri(code, RDI, BigInt(size));
+    ci('KERNEL32.dll.libyoyo_alloc');
+    stPut(slot, RAX);
+  }
+  function emitLibyoyoFree(slot) {
+    stGet(RDI, slot);
+    ci('KERNEL32.dll.libyoyo_free');
+  }
+  function emitLibyoyoOpen(slot, strId) {
+    // rdi = pointer to NUL-terminated path string
+    ld(RDI, strPos[strId] + 4);
+    ci('KERNEL32.dll.libyoyo_open');
+    stPut(slot, RAX);
+  }
+  function emitLibyoyoRead(slot, fdSlot, size) {
+    stGet(RDI, fdSlot);
+    stGet(RSI, slot);
+    E.mov_ri(code, RDX, BigInt(size));
+    ci('KERNEL32.dll.libyoyo_read');
+    stPut(slot + 1, RAX);  // bytes read
+  }
+  function emitLibyoyoWrite(fdSlot, slot, size) {
+    stGet(RDI, fdSlot);
+    stGet(RSI, slot);
+    E.mov_ri(code, RDX, BigInt(size));
+    ci('KERNEL32.dll.libyoyo_write');
+  }
+  function emitLibyoyoClose(fdSlot) {
+    stGet(RDI, fdSlot);
+    ci('KERNEL32.dll.libyoyo_close');
+  }
+  function emitLibyoyoExit(slot) {
+    stGet(RDI, slot);
+    ci('KERNEL32.dll.libyoyo_exit');
+    E.mov_ri(code, RCX, 0n); ci('KERNEL32.dll.ExitProcess');  // unreachable but safe
+  }
+  function emitLibyoyoPrint(slot) {
+    stGet(RDI, slot);
+    ci('KERNEL32.dll.libyoyo_print');
+  }
+  function emitLibyoyoTime(slot) {
+    ci('KERNEL32.dll.libyoyo_time');
+    stPut(slot, RAX);
+  }
+
   function emit(op) {
     const a = op.args, o = op.op;
     if (o === 0x30) stSet(a[0].v, a[1] ? a[1].v : 0);
@@ -193,7 +243,18 @@ function createWinEmitContext(prog, opts = {}) {
         const b = parseInt(hex.substr(i, 2), 16);
         if (!isNaN(b)) code.u8(b);
       }
-    } else {
+    }
+    // libyoyo_* (Phase 4c) - self-emit path
+    else if (o === 0x52) emitLibyoyoAlloc(a[0].v, a[1].v);
+    else if (o === 0x53) emitLibyoyoFree(a[0].v);
+    else if (o === 0x54) emitLibyoyoOpen(a[0].v, a[1].v);
+    else if (o === 0x55) emitLibyoyoRead(a[0].v, a[1].v, a[2].v);
+    else if (o === 0x56) emitLibyoyoWrite(a[0].v, a[1].v, a[2].v);
+    else if (o === 0x57) emitLibyoyoClose(a[0].v);
+    else if (o === 0x58) emitLibyoyoExit(a[0].v);
+    else if (o === 0x59) emitLibyoyoPrint(a[0].v);
+    else if (o === 0x5a) emitLibyoyoTime(a[0].v);
+    else {
       throw new CompileError(`line ${op.line || '?'}: unimplemented opcode 0x${o.toString(16)} in emit`);
     }
   }
@@ -247,6 +308,16 @@ function createWinEmitContext(prog, opts = {}) {
       case Op.LOAD_FILE: emitLoadFile(tirOp.stateSlot, tirOp.stringId); break;
       case Op.WRITE_FILE: emitWriteFile(tirOp.fdSlot, tirOp.bufSlot, tirOp.lenSlot); break;
       case Op.ALLOC: emitAlloc(tirOp.slot, tirOp.size); break;
+      // libyoyo_* (Phase 4c)
+      case Op.LIBYOYO_ALLOC: emitLibyoyoAlloc(tirOp.slot, tirOp.size); break;
+      case Op.LIBYOYO_FREE: emitLibyoyoFree(tirOp.slot); break;
+      case Op.LIBYOYO_OPEN: emitLibyoyoOpen(tirOp.slot, tirOp.stringId); break;
+      case Op.LIBYOYO_READ: emitLibyoyoRead(tirOp.slot, tirOp.fdSlot, tirOp.size); break;
+      case Op.LIBYOYO_WRITE: emitLibyoyoWrite(tirOp.fdSlot, tirOp.slot, tirOp.size); break;
+      case Op.LIBYOYO_CLOSE: emitLibyoyoClose(tirOp.fdSlot); break;
+      case Op.LIBYOYO_EXIT: emitLibyoyoExit(tirOp.slot); break;
+      case Op.LIBYOYO_PRINT: emitLibyoyoPrint(tirOp.slot); break;
+      case Op.LIBYOYO_TIME: emitLibyoyoTime(tirOp.slot); break;
       case Op.MEMCPY_DATA: stGet(RDI, tirOp.dst); ld(RSI, tirOp.blobOff); E.mov_ri(code, RCX, BigInt(tirOp.len)); code.u8(0xf3); code.u8(0xa4); break;
       case Op.MEMCPY_STATE: stGet(RDI, tirOp.dst); stGet(RSI, tirOp.src); stGet(RCX, tirOp.lenSlot); code.u8(0xf3); code.u8(0xa4); break;
       case Op.RAW_A0: {

@@ -184,7 +184,74 @@ function makeLinuxEmit(code, dr, strs, strPos) {
     syscall(code);
   }
 
-  return { emitLoadFile, emitWriteFile, emitAlloc, emitExit, stSet, stGet, stPut, ld };
+  // libyoyo_* call emitters (Phase 4c).
+  // On Linux, libyoyo is linked as a shared library (libyoyo-linux.so).
+  // Calls go through GOT/PLT, encoded as `call [rip+rel32]` (FF 15) with
+  // the linker resolving to the GOT entry. This is the same pattern as
+  // Windows IAT, just with different linker behavior at runtime.
+  function emitLibyoyoCallPlaceholder() {
+    // Emit `call [rip + 0]` placeholder. Linker patches rel32 + index.
+    code.u8(0xFF); code.u8(0x15); code.u8(0x00); code.u8(0x00); code.u8(0x00); code.u8(0x00);
+    return code.tell() - 4;  // return offset of rel32
+  }
+  function emitLibyoyoAlloc(stateId, size) {
+    E.mov_ri(code, RDI, BigInt(size));
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_alloc', rel32Pos: emitLibyoyoCallPlaceholder() });
+    stPut(stateId, RAX);
+  }
+  function emitLibyoyoFree(stateId) {
+    stGet(RDI, stateId);
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_free', rel32Pos: emitLibyoyoCallPlaceholder() });
+  }
+  function emitLibyoyoOpen(stateId, strIdx) {
+    ld(RDI, strPos[strIdx] + 4);
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_open', rel32Pos: emitLibyoyoCallPlaceholder() });
+    stPut(stateId, RAX);
+  }
+  function emitLibyoyoRead(stateId, fdSlot, size) {
+    stGet(RDI, fdSlot);
+    stGet(RSI, stateId);
+    E.mov_ri(code, RDX, BigInt(size));
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_read', rel32Pos: emitLibyoyoCallPlaceholder() });
+    stPut(stateId + 1, RAX);
+  }
+  function emitLibyoyoWrite(fdSlot, stateId, size) {
+    stGet(RDI, fdSlot);
+    stGet(RSI, stateId);
+    E.mov_ri(code, RDX, BigInt(size));
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_write', rel32Pos: emitLibyoyoCallPlaceholder() });
+  }
+  function emitLibyoyoClose(fdSlot) {
+    stGet(RDI, fdSlot);
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_close', rel32Pos: emitLibyoyoCallPlaceholder() });
+  }
+  function emitLibyoyoExit(stateId) {
+    stGet(RDI, stateId);
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_exit', rel32Pos: emitLibyoyoCallPlaceholder() });
+    emitExit();  // unreachable
+  }
+  function emitLibyoyoPrint(stateId) {
+    stGet(RDI, stateId);
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_print', rel32Pos: emitLibyoyoCallPlaceholder() });
+  }
+  function emitLibyoyoTime(stateId) {
+    code.libyoyoFixups = code.libyoyoFixups || [];
+    code.libyoyoFixups.push({ name: 'libyoyo_time', rel32Pos: emitLibyoyoCallPlaceholder() });
+    stPut(stateId, RAX);
+  }
+
+  return { emitLoadFile, emitWriteFile, emitAlloc, emitExit,
+           emitLibyoyoAlloc, emitLibyoyoFree, emitLibyoyoOpen, emitLibyoyoRead,
+           emitLibyoyoWrite, emitLibyoyoClose, emitLibyoyoExit, emitLibyoyoPrint,
+           emitLibyoyoTime, stSet, stGet, stPut, ld };
 }
 
 module.exports = { buildLinuxStartup, buildLinuxOutputStartup, buildLinuxFixupResolver, makeLinuxEmit, syscall };

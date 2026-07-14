@@ -95,6 +95,25 @@ function lowerOpcode(op, args) {
       return [{ kind: Op.LOAD_FILE, stateSlot: argN(a, 0), stringId: argN(a, 1) }];
     case 0x51:
       return [{ kind: Op.WRITE_FILE, fdSlot: argN(a, 0), bufSlot: argN(a, 1), lenSlot: argN(a, 2) }];
+    // libyoyo_* calls (Phase 4c) - 0x52-0x5A
+    case 0x52:
+      return [{ kind: Op.LIBYOYO_ALLOC, slot: argN(a, 0), size: argN(a, 1) }];
+    case 0x53:
+      return [{ kind: Op.LIBYOYO_FREE, slot: argN(a, 0) }];
+    case 0x54:
+      return [{ kind: Op.LIBYOYO_OPEN, slot: argN(a, 0), stringId: argN(a, 1) }];
+    case 0x55:
+      return [{ kind: Op.LIBYOYO_READ, slot: argN(a, 0), fdSlot: argN(a, 1), size: argN(a, 2) }];
+    case 0x56:
+      return [{ kind: Op.LIBYOYO_WRITE, fdSlot: argN(a, 0), bufSlot: argN(a, 1), size: argN(a, 2) }];
+    case 0x57:
+      return [{ kind: Op.LIBYOYO_CLOSE, fdSlot: argN(a, 0) }];
+    case 0x58:
+      return [{ kind: Op.LIBYOYO_EXIT, slot: argN(a, 0) }];
+    case 0x59:
+      return [{ kind: Op.LIBYOYO_PRINT, slot: argN(a, 0) }];
+    case 0x5A:
+      return [{ kind: Op.LIBYOYO_TIME, slot: argN(a, 0) }];
     case 0x84:
       return [{ kind: Op.MEMCPY_DATA, dst: argN(a, 0), blobOff: argN(a, 1), len: argN(a, 2) }];
     case 0x85:

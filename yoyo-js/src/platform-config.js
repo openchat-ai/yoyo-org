@@ -12,6 +12,10 @@ const PE_TEXT_FILE_OFF = 0x400;
 const WIN_FUNCS = [
   'ExitProcess', 'GetStdHandle', 'WriteFile', 'ReadFile',
   'CreateFileA', 'GetFileSize', 'CloseHandle', 'VirtualAlloc',
+  // libyoyo_* (Phase 4c) - imported from libyoyo.dll (or libyoyo.a static)
+  'libyoyo_alloc', 'libyoyo_free', 'libyoyo_open', 'libyoyo_read',
+  'libyoyo_write', 'libyoyo_close', 'libyoyo_exit', 'libyoyo_print',
+  'libyoyo_time',
 ];
 
 const LINUX_SYSCALL = {

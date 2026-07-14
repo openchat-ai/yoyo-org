@@ -108,6 +108,16 @@ function createEmitContext(strs, strPos, opts = {}) {
     }
     else if (o === 0xa1) { if (a[0]) code.u8(a[0].v & 255); }
     else if (o === OP_RAW_BYTES) { for (const b of op.rawBytes) code.u8(b); }
+    // libyoyo_* (Phase 4c) - self-emit path
+    else if (o === 0x52) linux.emitLibyoyoAlloc(a[0].v, a[1].v);
+    else if (o === 0x53) linux.emitLibyoyoFree(a[0].v);
+    else if (o === 0x54) linux.emitLibyoyoOpen(a[0].v, a[1].v);
+    else if (o === 0x55) linux.emitLibyoyoRead(a[0].v, a[1].v, a[2].v);
+    else if (o === 0x56) linux.emitLibyoyoWrite(a[0].v, a[1].v, a[2].v);
+    else if (o === 0x57) linux.emitLibyoyoClose(a[0].v);
+    else if (o === 0x58) linux.emitLibyoyoExit(a[0].v);
+    else if (o === 0x59) linux.emitLibyoyoPrint(a[0].v);
+    else if (o === 0x5a) linux.emitLibyoyoTime(a[0].v);
     else {
       throw new CompileError(`line ${op.line || '?'}: unimplemented opcode 0x${o.toString(16)} in emit`);
     }
@@ -165,6 +175,16 @@ function createEmitContext(strs, strPos, opts = {}) {
       case Op.LOAD_FILE: linux.emitLoadFile(tirOp.stateSlot, tirOp.stringId); break;
       case Op.WRITE_FILE: linux.emitWriteFile(tirOp.fdSlot, tirOp.bufSlot, tirOp.lenSlot); break;
       case Op.ALLOC: linux.emitAlloc(tirOp.slot, tirOp.size); break;
+      // libyoyo_* (Phase 4c)
+      case Op.LIBYOYO_ALLOC: linux.emitLibyoyoAlloc(tirOp.slot, tirOp.size); break;
+      case Op.LIBYOYO_FREE: linux.emitLibyoyoFree(tirOp.slot); break;
+      case Op.LIBYOYO_OPEN: linux.emitLibyoyoOpen(tirOp.slot, tirOp.stringId); break;
+      case Op.LIBYOYO_READ: linux.emitLibyoyoRead(tirOp.slot, tirOp.fdSlot, tirOp.size); break;
+      case Op.LIBYOYO_WRITE: linux.emitLibyoyoWrite(tirOp.fdSlot, tirOp.slot, tirOp.size); break;
+      case Op.LIBYOYO_CLOSE: linux.emitLibyoyoClose(tirOp.fdSlot); break;
+      case Op.LIBYOYO_EXIT: linux.emitLibyoyoExit(tirOp.slot); break;
+      case Op.LIBYOYO_PRINT: linux.emitLibyoyoPrint(tirOp.slot); break;
+      case Op.LIBYOYO_TIME: linux.emitLibyoyoTime(tirOp.slot); break;
       case Op.MEMCPY_DATA: linux.stGet(RDI, tirOp.dst); linux.ld(RSI, tirOp.blobOff); E.mov_ri(code, RCX, BigInt(tirOp.len)); code.u8(0xf3); code.u8(0xa4); break;
       case Op.MEMCPY_STATE: linux.stGet(RDI, tirOp.dst); linux.stGet(RSI, tirOp.src); linux.stGet(RCX, tirOp.lenSlot); code.u8(0xf3); code.u8(0xa4); break;
       case Op.RAW_A0: {
