@@ -342,6 +342,12 @@ impl Platform for Win32Platform {
         let _ = str_slot;
         let _ = slot;
 
+        // Push callee-saved (r12, r13, r14 used internally as scratch)
+        // Win64 ABI requires callee to preserve these.
+        buf.push(0x41)?; buf.push(0x54)?; // push r12
+        buf.push(0x41)?; buf.push(0x55)?; // push r13
+        buf.push(0x41)?; buf.push(0x56)?; // push r14
+
         // 1. Path from RSI
         mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
 
@@ -396,6 +402,10 @@ impl Platform for Win32Platform {
         // 7. Return: rax = contentBuf, rdx = fileSize
         mov_r_r(buf, Reg::Rax, Reg::R14)?;
         mov_r_r(buf, Reg::Rdx, Reg::R13)?;
+        // Pop callee-saved
+        buf.push(0x41)?; buf.push(0x5E)?; // pop r14
+        buf.push(0x41)?; buf.push(0x5D)?; // pop r13
+        buf.push(0x41)?; buf.push(0x5C)?; // pop r12
         Ok(())
     }
 
@@ -413,6 +423,9 @@ impl Platform for Win32Platform {
         let _ = str_slot; // ignored
         let _ = id;       // ignored
         let _ = sz;       // ignored
+
+        // Push callee-saved (r12 used internally as hFile scratch)
+        buf.push(0x41)?; buf.push(0x54)?; // push r12
 
         // 1. Path from RSI
         mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
@@ -447,6 +460,8 @@ impl Platform for Win32Platform {
         call_iat_thunk(buf, Win32Api::CloseHandle)?;
         shadow_ret(buf)?;
 
+        // Pop callee-saved
+        buf.push(0x41)?; buf.push(0x5C)?; // pop r12
         Ok(())
     }
 

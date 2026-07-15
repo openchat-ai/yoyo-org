@@ -56,6 +56,36 @@
 00 00 A0 8B
 00 00 A0 37
 
+; Copy cmdline to stack at [rsp+0x900] (safe scratch in our 0x1000 frame)
+; Use rsi = cmdline, rdi = rsp+0x900, rcx = 0x400 bytes
+; lea rdi, [rsp+0x900]  ; 48 8D BC 24 00 09 00 00
+00 00 A0 48
+00 00 A0 8D
+00 00 A0 BC
+00 00 A0 24
+00 00 A0 00
+00 00 A0 09
+00 00 A0 00
+00 00 A0 00
+; mov ecx, 0x400  ; B9 00 04 00 00
+00 00 A0 B9
+00 00 A0 00
+00 00 A0 04
+00 00 A0 00
+00 00 A0 00
+; rep movsb  ; F3 A4
+00 00 A0 F3
+00 00 A0 A4
+; rsi = rsp+0x900 (start of copy in stack)
+00 00 A0 48
+00 00 A0 8D
+00 00 A0 B4
+00 00 A0 24
+00 00 A0 00
+00 00 A0 09
+00 00 A0 00
+00 00 A0 00
+
 ; === Argv parser (raw x86, 72 bytes) ===
 ; offset 0: movzx eax, byte [rsi]  ; 0F B6 06
 00 00 A0 0F
@@ -117,51 +147,44 @@
 ; offset 40: je .skip3 (target 53, disp = 11 = 0x0B)
 00 00 A0 74
 00 00 A0 0B
-; offset 42: mov byte [rsi], 0  ; null-terminate argv[1]
-00 00 A0 C6
-00 00 A0 06
-00 00 A0 00
-; offset 45: inc rsi
+; offset 42: inc rsi (skip space, do NOT null-terminate — cmdline is OS read-only!)
 00 00 A0 48
 00 00 A0 FF
 00 00 A0 C6
-; offset 48: jmp .end2 (target 31, disp = -19 = 0xED)
+; offset 45: jmp .end2 (target 31, disp = 31-47 = -16 = 0xF0)
 00 00 A0 EB
-00 00 A0 ED
-; offset 50: .skip3: movzx eax, byte [rsi]
+00 00 A0 F0
+; offset 47: .skip3: movzx eax, byte [rsi]
 00 00 A0 0F
 00 00 A0 B6
 00 00 A0 06
-; offset 53: cmp al, 0x20
+; offset 50: cmp al, 0x20
 00 00 A0 3C
 00 00 A0 20
-; offset 55: jne .argv2_start (target 66, disp = 9 = 0x09)
+; offset 52: jne .argv2_start (target 60, disp = 60-54 = 6 = 0x06)
 00 00 A0 75
-00 00 A0 09
-; offset 57: inc rsi
+00 00 A0 06
+; offset 54: inc rsi
 00 00 A0 48
 00 00 A0 FF
 00 00 A0 C6
-; offset 60: jmp .skip3 (target 50, disp = -12 = 0xF4)
+; offset 57: jmp .skip3 (target 47, disp = 47-59 = -12 = 0xF4)
 00 00 A0 EB
 00 00 A0 F4
-; offset 62: .argv2_start: mov byte [rsi], 0  ; null-terminate argv[2]
-00 00 A0 C6
-00 00 A0 06
-00 00 A0 00
+; offset 59: .argv2_start: mov r13, rsi  ; 49 89 F5
 00 00 A0 49
 00 00 A0 89
 00 00 A0 F5
-; offset 68: .argv2_done:
+; offset 62: .argv2_done:
 
 ; === H_50: load input.ty (rsi=argv[1] = r12) ===
 00 00 A0 4C
 00 00 A0 89
 00 00 A0 E6
 00 00 50 00 00 00
+; After: rax = contentBuf, rdx = fileSize
 
 ; === H_51: write output.exe (rsi=argv[2] = r13) ===
-; After H_50: rax = contentBuf, rdx = fileSize
 00 00 A0 4C
 00 00 A0 89
 00 00 A0 EE
@@ -170,31 +193,6 @@
 00 00 A0 89
 00 00 A0 C2
 ; mov rdx, rax  ; rdx = contentBuf
-00 00 A0 48
-00 00 A0 89
-00 00 A0 C2
-00 00 51 00 00 00
-
-; === H_50: load input.ty (rsi=argv[1] = r12) ===
-; mov rsi, r12  ; 4C 89 E6
-00 00 A0 4C
-00 00 A0 89
-00 00 A0 E6
-00 00 50 00 00 00
-; rax = contentBuf, rdx = fileSize
-
-; === H_51: write output.exe (rsi=argv[2] = r13) ===
-; After H_50: rax = contentBuf, rdx = fileSize
-; Setup: r8 = fileSize, rdx = contentBuf (swap)
-; mov rsi, r13  ; 4C 89 EE
-00 00 A0 4C
-00 00 A0 89
-00 00 A0 EE
-; mov r8, rdx  ; 49 89 C2  (r8 = fileSize)
-00 00 A0 49
-00 00 A0 89
-00 00 A0 C2
-; mov rdx, rax  ; 48 89 C2  (rdx = contentBuf)
 00 00 A0 48
 00 00 A0 89
 00 00 A0 C2
