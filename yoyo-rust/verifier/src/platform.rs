@@ -430,9 +430,9 @@ impl Platform for Win32Platform {
         // hFile in r12
         mov_r_r(buf, Reg::R12, Reg::Rax)?;
 
-        // 3. WriteFile(hFile=r12, contentBuf=r8, fileSize=rdx)
+        // 3. WriteFile(hFile=r12, contentBuf=rdx, fileSize=r8)
+        // Caller protocol: r8 = fileSize, rdx = contentBuf
         mov_r_r(buf, Reg::Rcx, Reg::R12)?;
-        mov_r_r(buf, Reg::R8, Reg::Rdx)?; // fileSize → r8 (3rd arg)
         movabs(buf, Reg::R9, 0)?;
         movabs(buf, Reg::Rax, 0)?;
         buf.push(0x50)?;
