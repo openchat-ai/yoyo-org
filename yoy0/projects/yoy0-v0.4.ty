@@ -1,0 +1,105 @@
+; =============================================================================
+; yoy0.ty v0.4 — argv-aware self-hosting compiler
+; =============================================================================
+;
+; v0.4 changes from v0.1:
+;   - State lives in stack (H_00 entry sub rsp, 0x1000; lea r15, [rsp+0x800])
+;     Reason: BSS section is unwritable in our minimal PE (Win10 loader quirk)
+;   - H_50/H_51 paths from RSI register (set by caller; ignore str_slot arg)
+;   - H_50 returns: rax = contentBuf, rdx = fileSize
+;   - argv[1]/[2] parsed from rdi=&cmdline (passed by startup via GetCommandLineA)
+;   - 24-bit opcode (3 bytes: 00 00 xx, low byte = real opcode)
+;   - 0 malloc, 0 free (static only)
+;   - R15 = state base pointer (now points to stack region, not BSS)
+;   - 3-state (trit) scanner state machine
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; H_00: ENTRY — setup stack state, parse argv, call H_50/H_01/H_30/H_51
+; -----------------------------------------------------------------------------
+00 00 40 00
+  ; Save callee-saved registers (H_50/H_51 clobber r12, r13, r14 internally;
+  ; but Win64 ABI requires us to preserve them across our own function).
+  00 00 A0 41 54                    ; push r12
+  00 00 A0 41 55                    ; push r13
+  00 00 A0 41 56                    ; push r14
+  00 00 A0 53                       ; push rbx
+  00 00 A0 41 57                    ; push r15 (we'll change r15 for stack state)
+  00 00 A0 56                       ; push rsi (will use as cmdline pointer)
+
+  ; sub rsp, 0x1000  — state buffer in stack
+  00 00 A0 48 81 EC 00 10 00 00    ; 7B
+
+  ; lea r15, [rsp+0x800]  — r15 = state base (in stack)
+  00 00 A0 48 8D BC 24 00 08 00 00  ; 8B
+
+  ; rdi = &save_slot (PSTR cmdline pointer from startup)
+  ; mov rsi, [rdi]   — rsi = PSTR cmdline
+  00 00 A0 48 8B 37                ; mov rsi, [rdi]  (3B)
+
+  ; === Argv parser: skip first word, find argv[1] ===
+  ; (1) Skip first word (program name): advance rsi until space or null
+  ; .skip1: load byte, check null/space
+  00 00 A0 0F B6 06                ; movzx eax, byte [rsi]  (4B)
+  00 00 A0 84 C0                   ; test al, al  (2B)
+  00 00 A0 74 0C                   ; jz .end (skip 12 bytes to skip_spaces)  (2B) — placeholder
+  00 00 A0 3C 20                   ; cmp al, 0x20  (2B)
+  00 00 A0 74 02                   ; je .end1 (2B) — placeholder
+  00 00 A0 48 FF C6                ; inc rsi  (4B)
+  00 00 A0 EB F0                   ; jmp .skip1 (2B)
+
+  ; .end1: skip spaces
+  ; .skip2: load byte, check space
+  00 00 A0 0F B6 06                ; movzx eax, byte [rsi]  (4B)
+  00 00 A0 3C 20                   ; cmp al, 0x20  (2B)
+  00 00 A0 75 02                   ; jne .argv1 (2B) — placeholder
+  00 00 A0 48 FF C6                ; inc rsi  (4B)
+  00 00 A0 EB F2                   ; jmp .skip2 (2B)
+
+  ; .argv1: rsi = argv[1] start
+  ; Save argv[1] in r12 (callee-saved)
+  00 00 A0 49 89 F4                ; mov r12, rsi  (4B)
+
+  ; Find end of argv[1] (next space or null)
+  ; .end2: load byte
+  00 00 A0 0F B6 06                ; movzx eax, byte [rsi]  (4B)
+  00 00 A0 84 C0                   ; test al, al  (2B)
+  00 00 A0 74 0C                   ; jz .end2_done  (2B) — placeholder
+  00 00 A0 3C 20                   ; cmp al, 0x20  (2B)
+  00 00 A0 74 06                   ; je .end2_done  (2B) — placeholder
+  00 00 A0 48 FF C6                ; inc rsi  (4B)
+  00 00 A0 EB F0                   ; jmp .end2  (2B)
+
+  ; Skip spaces between argv[1] and argv[2]
+  ; .skip3: load byte
+  00 00 A0 0F B6 06                ; movzx eax, byte [rsi]  (4B)
+  00 00 A0 3C 20                   ; cmp al, 0x20  (2B)
+  00 00 A0 75 02                   ; jne .argv2  (2B) — placeholder
+  00 00 A0 48 FF C6                ; inc rsi  (4B)
+  00 00 A0 EB F2                   ; jmp .skip3  (2B)
+
+  ; .argv2: rsi = argv[2] start
+  00 00 A0 49 89 F5                ; mov r13, rsi  (4B)
+
+  ; === H_50: load input.ty ===
+  ; rsi = argv[1] (path)
+  00 00 41 50                      ; call H_50  (4B)
+  ; rax = contentBuf, rdx = fileSize
+  00 00 A0 49 89 C4                ; mov r12, rax  (4B)  ; r12 = contentBuf
+  00 00 A0 49 89 D5                ; mov r13, rdx  (4B)  ; r13 = fileSize
+
+  ; (TODO: H_01, H_30, H_50, H_51 — full compiler logic)
+
+  ; === Cleanup ===
+  00 00 A0 48 81 C4 00 10 00 00    ; add rsp, 0x1000  (7B)
+  00 00 A0 5E                       ; pop rsi  (1B)
+  00 00 A0 41 5F                    ; pop r15  (2B)
+  00 00 A0 5B                       ; pop rbx  (1B)
+  00 00 A0 41 5E                    ; pop r14  (2B)
+  00 00 A0 41 5D                    ; pop r13  (2B)
+  00 00 A0 41 5C                    ; pop r12  (2B)
+  00 00 FF                          ; ret  (3B)
+
+; -----------------------------------------------------------------------------
+; (TODO) H_01: SCANNER, H_30: EMITTER, H_50/H_51: FILE I/O
+; -----------------------------------------------------------------------------
