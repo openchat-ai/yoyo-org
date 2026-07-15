@@ -127,7 +127,10 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(soid_off + 4, 0);
     pe[soid_off..soid_off + 4].copy_from_slice(&idata_fsize.to_le_bytes());
 
-    // SizeOfUninitializedData (offset 0x0C) — leave as 0
+    // SizeOfUninitializedData (offset 0x0C) — v0.4: must equal .bss VSize for loader to allocate the page
+    let souid_off = (opt_start + 0x0C) as usize;
+    pe.resize(souid_off + 4, 0);
+    pe[souid_off..souid_off + 4].copy_from_slice(&BSS_VSIZE.to_le_bytes());
 
     // AddressOfEntryPoint (offset 0x10) = TEXT_RVA (startup code at .text head)
     let eop_off = (opt_start + 0x10) as usize;
@@ -168,11 +171,11 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(img_ver_off + 4, 0);
     // Already 0 from resize
 
-    // Major/Minor Subsystem Version (offset 0x30-0x33) — Win64 wants >= 5 (Win10)
+    // Major/Minor Subsystem Version (offset 0x30-0x33) — Win10+ requires 6.2 minimum
     let subsys_ver_off = (opt_start + 0x30) as usize;
     pe.resize(subsys_ver_off + 4, 0);
     pe[subsys_ver_off..subsys_ver_off + 2].copy_from_slice(&6u16.to_le_bytes());
-    pe[subsys_ver_off + 2..subsys_ver_off + 4].copy_from_slice(&0u16.to_le_bytes());
+    pe[subsys_ver_off + 2..subsys_ver_off + 4].copy_from_slice(&2u16.to_le_bytes());
 
     // Win32VersionValue (offset 0x34) — leave 0 (no extension used)
 
@@ -191,10 +194,10 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(subsys_off + 2, 0);
     pe[subsys_off..subsys_off + 2].copy_from_slice(&3u16.to_le_bytes());
 
-    // DllCharacteristics (offset 0x46) — leave 0 (no DYNAMIC_BASE / NX_COMPAT)
+    // DllCharacteristics (offset 0x46) — v0.4: set DYNAMIC_BASE (0x40) for Win10 loader to commit BSS pages
     let dllchars_off = (opt_start + 0x46) as usize;
     pe.resize(dllchars_off + 2, 0);
-    // already 0
+    pe[dllchars_off..dllchars_off + 2].copy_from_slice(&0x0040u16.to_le_bytes());
 
     // SizeOfStackReserve (offset 0x48, u64) — Win64 default 1 MB
     let stack_rsv_off = (opt_start + 0x48) as usize;
@@ -245,7 +248,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // .bss section — v0.4: provide FSize=BSS_VSIZE + PointerToRawData=idata_file_off+idata_fsize
     // so the loader actually commits a R/W page. (UNINITIALIZED_DATA + FSize=0 hung on Win10.)
     let bss_file_off = idata_file_off + idata_fsize;
-    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, BSS_VSIZE, idata_file_off + idata_fsize, 0xC0000040);  // v0.4: FSize=BSS_VSIZE + INITIALIZED_DATA — force loader to commit the page  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
+    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, BSS_VSIZE, idata_file_off + idata_fsize, 0xC0000040);  // v0.4 alt: FSize=BSS_VSIZE + INITIALIZED_DATA + DYNAMIC_BASE + SizeOfUninitializedData  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
 
     // Pad to HEADERS_SIZE — must accommodate 3 section headers (was 2):
     //   headers = 0xD8 + 3 * 40 = 0xD8 + 0x78 = 0x150, align to 0x200
@@ -268,7 +271,6 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // .bss section: write 0x1000 zero bytes (BSS_FSIZE) at bss_file_off so loader
     // sees file content backing the section, commits page as PAGE_READWRITE.
     let bss_file_off = idata_file_off as usize + idata_fsize as usize;
-    // Pad with zeros to bss_file_off, then write 0x1000 zero bytes for BSS content
     pe.resize(bss_file_off, 0);
     pe.extend(vec![0u8; BSS_VSIZE as usize]);
 
