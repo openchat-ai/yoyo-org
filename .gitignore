@@ -53,10 +53,19 @@ test-min3.ty
 top-write.ty
 yoyo-blob.ty
 yoyo-noblob.ty
-yoyo.ty.win-bak
+yoyo-24bit.ty
+yoyo-win.ty
+yoyo.ty.bak
+mini-test.ty
+
+# Trash staging area (local-only, never track)
+_trash/
 
 # yoyo-asm historical debug artifacts
 yoyo-asm/yoy0-*
+yoyo-asm/yoyo.ty
+yoyo-asm/minimal.ky
+yoyo-asm/output-fixed.exe
 yoyo-asm/temp-*
 yoyo-asm/code_dump.bin
 yoyo-asm/run-test-output.exe
@@ -70,6 +79,10 @@ yoyo-asm/yoyo-asm.v*.exe
 yoyo-asm/v3-final.exe
 yoyo-asm/yoyo-asm-core.asm
 yoyo-asm/build/
+
+# Root-level debug scripts
+/_debug_pe.py
+/fix-pe-iat.py
 
 # OS / editor
 .DS_Store
