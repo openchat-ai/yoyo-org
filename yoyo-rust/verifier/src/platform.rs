@@ -326,119 +326,123 @@ impl Platform for Win32Platform {
     }
 
     fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_slot: u16) -> IsaResult<()> {
-        // state[slot]   = pointer to file content
-        // state[slot+1] = file size
-        //
-        // v0.4 sequence (str_slot replaces compile-time str_idx):
-        //   1. lea rcx, [r15 + str_slot*8]    ; path PSTR from runtime state
-        //   2. CreateFileA → hFile
-        //   3. GetFileSize  → fileSize
-        //   4. VirtualAlloc → contentBuf
-        //   5. ReadFile
+        // v0.4 sequence (path from RSI register, BSS unwritable on Win10):
+        //   0. caller (yoy0.ty v0.4) sets RSI = PSTR path before CALL H_50
+        //   1. mov rcx, rsi  ; path from caller (Win64 ABI: rsi is non-volatile)
+        //   2. CreateFileA → hFile (in r12, non-volatile callee-saved)
+        //   3. GetFileSize  → fileSize (in r13)
+        //   4. VirtualAlloc → contentBuf (in r14)
+        //   5. ReadFile → contentBuf
         //   6. CloseHandle
+        //   7. return: rax = contentBuf, rdx = fileSize
+        //
+        // yoy0.ty v0.4 H_00 must push r12/r13/r14 on entry, pop on return.
+        // str_slot argument is kept in TIR for future state-based paths; ignored here.
 
-        let hfile_slot = (slot + 2) as u8;  // temp slot for hFile
-        let size_slot = (slot + 1) as u8;
+        let _ = str_slot;
+        let _ = slot;
 
-        // 1. Load filename pointer from state[str_slot] (v0.4: runtime-derived path)
-        lea_reg_r15(buf, Reg::Rcx, str_slot)?;
+        // 1. Path from RSI
+        mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
 
-        // 2. CreateFileA(rcx=filename, GENERIC_READ=0x80000000, FILE_SHARE_READ=1, NULL, OPEN_EXISTING=3, 0, NULL)
+        // 2. CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)
         movabs(buf, Reg::Rdx, 0x8000_0000u64)?;
         movabs(buf, Reg::R8, 1)?;
         movabs(buf, Reg::R9, 0)?;
-        // 5th arg OPEN_EXISTING (3) goes on stack
-        // push 3; sub rsp, 0x28; call; add rsp, 0x28; add rsp, 8
-        movabs(buf, Reg::Rax, 3)?;
-        buf.push(0x50)?; // push rax
+        movabs(buf, Reg::Rax, 3)?; // OPEN_EXISTING
+        buf.push(0x50)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::CreateFileA)?;
         shadow_ret(buf)?;
-        add_imm(buf, Reg::Rsp, 8)?; // undo push
-        store_state(buf, hfile_slot, Reg::Rax)?; // state[hfile] = hFile
+        add_imm(buf, Reg::Rsp, 8)?;
+        mov_r_r(buf, Reg::R12, Reg::Rax)?;
 
-        // 3. GetFileSize(rcx=hFile, rdx=NULL)
-        load_state(buf, hfile_slot, Reg::Rcx)?;
+        // 3. GetFileSize(hFile=r12, NULL)
+        mov_r_r(buf, Reg::Rcx, Reg::R12)?;
         movabs(buf, Reg::Rdx, 0)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::GetFileSize)?;
         shadow_ret(buf)?;
-        store_state(buf, size_slot, Reg::Rax)?; // state[slot+1] = fileSize
+        mov_r_r(buf, Reg::R13, Reg::Rax)?;
 
-        // 4. VirtualAlloc(0, fileSize, MEM_COMMIT|MEM_RESERVE=0x3000, PAGE_READWRITE=4)
+        // 4. VirtualAlloc(0, fileSize, 0x3000, 0x40)
         movabs(buf, Reg::Rcx, 0)?;
-        load_state(buf, size_slot, Reg::Rdx)?;
+        mov_r_r(buf, Reg::Rdx, Reg::R13)?;
         movabs(buf, Reg::R8, 0x3000)?;
-        movabs(buf, Reg::R9, 4)?;
+        movabs(buf, Reg::R9, 0x40)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::VirtualAlloc)?;
         shadow_ret(buf)?;
-        store_state(buf, slot as u8, Reg::Rax)?; // state[slot] = buf
+        mov_r_r(buf, Reg::R14, Reg::Rax)?;
 
-        // 5. ReadFile(rcx=hFile, rdx=buf, r8=fileSize, r9=&bytesRead, NULL)
-        load_state(buf, hfile_slot, Reg::Rcx)?;
-        load_state(buf, slot as u8, Reg::Rdx)?;
-        load_state(buf, size_slot, Reg::R8)?;
-        // r9 = stack-based &bytesRead: sub rsp, 4; lea r9, [rsp]; but simpler: r9=0, ignore bytesRead
+        // 5. ReadFile(hFile=r12, contentBuf=r14, fileSize=r13, 0, NULL)
+        mov_r_r(buf, Reg::Rcx, Reg::R12)?;
+        mov_r_r(buf, Reg::Rdx, Reg::R14)?;
+        mov_r_r(buf, Reg::R8, Reg::R13)?;
         movabs(buf, Reg::R9, 0)?;
-        // 5th arg NULL
         movabs(buf, Reg::Rax, 0)?;
-        buf.push(0x50)?; // push rax
+        buf.push(0x50)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::ReadFile)?;
         shadow_ret(buf)?;
-        add_imm(buf, Reg::Rsp, 8)?; // undo push
+        add_imm(buf, Reg::Rsp, 8)?;
 
-        // 6. CloseHandle(rcx=hFile)
-        load_state(buf, hfile_slot, Reg::Rcx)?;
+        // 6. CloseHandle(hFile=r12)
+        mov_r_r(buf, Reg::Rcx, Reg::R12)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::CloseHandle)?;
         shadow_ret(buf)?;
 
+        // 7. Return: rax = contentBuf, rdx = fileSize
+        mov_r_r(buf, Reg::Rax, Reg::R14)?;
+        mov_r_r(buf, Reg::Rdx, Reg::R13)?;
         Ok(())
     }
 
     fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_slot: u16, sz: u16) -> IsaResult<()> {
-        // state[id] = buffer to write
-        // state[sz] = number of bytes
-        //
-        // v0.4 sequence (str_slot replaces compile-time str_idx):
-        //   1. lea rcx, [r15 + str_slot*8]    ; path PSTR from runtime state
-        //   2. CreateFileA → hFile
-        //   3. WriteFile
+        // v0.4 sequence (path from RSI, content from r8, size from rdx):
+        //   0. caller sets RSI = path, R8 = contentBuf, RDX = fileSize
+        //   1. mov rcx, rsi  ; path
+        //   2. CreateFileA → hFile (in r12, callee-saved)
+        //   3. WriteFile(hFile, contentBuf, fileSize)
         //   4. CloseHandle
+        //
+        // yoy0.ty v0.4 H_00 must push r12 on entry, pop on return.
+        // Uses r12 instead of state[slot] because BSS is unwritable on Win10.
 
-        let hfile_slot = (id + 1) as u8;
+        let _ = str_slot; // ignored
+        let _ = id;       // ignored
+        let _ = sz;       // ignored
 
-        // 1. Load filename from state[str_slot] (v0.4: runtime-derived path)
-        lea_reg_r15(buf, Reg::Rcx, str_slot)?;
+        // 1. Path from RSI
+        mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
 
-        // 2. CreateFileA(filename, GENERIC_WRITE=0x40000000, 0, NULL, CREATE_ALWAYS=2, 0, NULL)
+        // 2. CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)
         movabs(buf, Reg::Rdx, 0x4000_0000u64)?;
         movabs(buf, Reg::R8, 0)?;
         movabs(buf, Reg::R9, 0)?;
         movabs(buf, Reg::Rax, 2)?; // CREATE_ALWAYS
-        buf.push(0x50)?; // push rax
+        buf.push(0x50)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::CreateFileA)?;
         shadow_ret(buf)?;
-        add_imm(buf, Reg::Rsp, 8)?; // undo push
-        store_state(buf, hfile_slot, Reg::Rax)?;
+        add_imm(buf, Reg::Rsp, 8)?;
+        // hFile in r12
+        mov_r_r(buf, Reg::R12, Reg::Rax)?;
 
-        // 3. WriteFile(rcx=hFile, rdx=state[id], r8=state[sz], r9=0, NULL)
-        load_state(buf, hfile_slot, Reg::Rcx)?;
-        load_state(buf, id as u8, Reg::Rdx)?;
-        load_state(buf, sz as u8, Reg::R8)?;
+        // 3. WriteFile(hFile=r12, contentBuf=r8, fileSize=rdx)
+        mov_r_r(buf, Reg::Rcx, Reg::R12)?;
+        mov_r_r(buf, Reg::R8, Reg::Rdx)?; // fileSize → r8 (3rd arg)
         movabs(buf, Reg::R9, 0)?;
         movabs(buf, Reg::Rax, 0)?;
-        buf.push(0x50)?; // push rax
+        buf.push(0x50)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::WriteFile)?;
         shadow_ret(buf)?;
         add_imm(buf, Reg::Rsp, 8)?;
 
-        // 4. CloseHandle(rcx=hFile)
-        load_state(buf, hfile_slot, Reg::Rcx)?;
+        // 4. CloseHandle(hFile=r12)
+        mov_r_r(buf, Reg::Rcx, Reg::R12)?;
         shadow_frame(buf)?;
         call_iat_thunk(buf, Win32Api::CloseHandle)?;
         shadow_ret(buf)?;
@@ -447,26 +451,26 @@ impl Platform for Win32Platform {
     }
 
     fn startup_blob(&self) -> &[u8] {
-        // Win32 v0.4 startup (48 bytes — stack-argv pivot):
+        // Win32 v0.4 startup (48 bytes — stack-argv pivot, BSS-backed state):
         //   [0..1]     mov r15 prefix 0x49 0xB8
-        //   [2..9]     IMM64 placeholder (BSS_RVA — unused but kept for compat)
-        //   [10..13]   sub rsp, 0x28 (4B) — 0x20 shadow + 0x08 save slot
+        //   [2..9]     IMM64 placeholder (BSS_RVA — writable page from FSize=0x1000 file zeros)
+        //   [10..13]   sub rsp, 0x28 (4B)
         //   [14..19]   call [rip+rel] idx=15 GetCommandLineA (6B) → rax = PSTR cmdline
-        //   [20..24]   mov [rsp+0x20], rax (5B) — save cmdline below caller's retaddr
+        //   [20..24]   mov [rsp+0x20], rax (5B)
         //   [25..28]   add rsp, 0x28 (4B)
-        //   [29..33]   lea rdi, [rsp-0x08] (5B) — rdi = &save_slot (PSTR cmdline pointer)
-        //   [34..37]   sub rsp, 0x08 (4B) — align stack for H_00 call
+        //   [29..33]   lea rdi, [rsp-0x08] (5B) — rdi = &save_slot
+        //   [34..37]   sub rsp, 0x08 (4B) — align for H_00 call
         //   [38..42]   call rel32 (H_00); E8 at 38, rel32 at 39
         //   [43..46]   add rsp, 0x08 (4B)
         //   [47]       ret (1B)
         //
-        // H_00 receives rdi = &save_slot = pointer to PSTR cmdline in startup's frame.
-        // yoy0.ty v0.4 H_00 entry: parse cmdline at [rdi] for argv[1]/argv[2].
+        // H_00 receives rdi = &save_slot. yoy0.ty v0.4 reads cmdline from [rdi].
+        // State is on BSS (r15-based, since FSize=0x1000 file zeros ensures writable page).
         &[
-            0x49, 0xB8, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA (placeholder)
+            0x49, 0xB8, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA
             0x00, 0x00, 0x00, 0x00,             //
             0x48, 0x83, 0xEC, 0x28,             // sub rsp, 0x28
-            0xFF, 0x15, 0x0F, 0x00, 0x00, 0x00, // call [rip+rel] idx=15 GetCommandLineA
+            0xFF, 0x15, 0x0F, 0x00, 0x00, 0x00, // call GetCommandLineA
             0x48, 0x89, 0x44, 0x24, 0x20,       // mov [rsp+0x20], rax
             0x48, 0x83, 0xC4, 0x28,             // add rsp, 0x28
             0x48, 0x8D, 0x7C, 0x24, 0xF8,       // lea rdi, [rsp-0x08]

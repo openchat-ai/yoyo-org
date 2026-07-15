@@ -245,7 +245,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // .bss section — v0.4: provide FSize=BSS_VSIZE + PointerToRawData=idata_file_off+idata_fsize
     // so the loader actually commits a R/W page. (UNINITIALIZED_DATA + FSize=0 hung on Win10.)
     let bss_file_off = idata_file_off + idata_fsize;
-    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, 0u32, 0u32, 0xC0000080);  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
+    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, BSS_VSIZE, idata_file_off + idata_fsize, 0xC0000040);  // v0.4: FSize=BSS_VSIZE + INITIALIZED_DATA — force loader to commit the page  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
 
     // Pad to HEADERS_SIZE — must accommodate 3 section headers (was 2):
     //   headers = 0xD8 + 3 * 40 = 0xD8 + 0x78 = 0x150, align to 0x200
@@ -265,8 +265,12 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // Pad to .idata section file end (file alignment boundary)
     pe.resize(idata_file_off as usize + idata_fsize as usize, 0);
 
-    // v0.4: BSS not used (argv on stack). Don't add any file content for BSS.
-    // .bss section is in headers only (VAddr 0x3000, VSize 0x1000, RawSize 0).
+    // .bss section: write 0x1000 zero bytes (BSS_FSIZE) at bss_file_off so loader
+    // sees file content backing the section, commits page as PAGE_READWRITE.
+    let bss_file_off = idata_file_off as usize + idata_fsize as usize;
+    // Pad with zeros to bss_file_off, then write 0x1000 zero bytes for BSS content
+    pe.resize(bss_file_off, 0);
+    pe.extend(vec![0u8; BSS_VSIZE as usize]);
 
     Ok(fs::write(out_path, &pe).map_err(|e| format!("write {}: {}", out_path.display(), e))?)
 }
