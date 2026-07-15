@@ -10,6 +10,7 @@ pub struct SourceLine {
     pub line_no: u32,   // 1-indexed
     pub op: u8,
     pub args: Vec<u64>, // arg tokens parsed as u64
+    pub data: Vec<u8>,  // for 0x12 STR / 0x13 RAW data-def lines: the bytes of `s<hex>`
 }
 
 pub fn parse(src: &str) -> Vec<SourceLine> {
@@ -67,9 +68,30 @@ fn parse_inner(src: &str, vars: Option<&crate::variable::VarTable>) -> Vec<Sourc
             (b, 1)
         };
         // Skip arg parsing for data-definition opcodes (0x12 str, 0x13 raw bytes)
-        // — they may contain `s<hex>` string tokens longer than 16 chars.
+        // — they contain a single `s<hex>` data token (any even length).
+        // Sub-exp B (2026-07-15): parse the `s<hex>` into bytes for downstream use.
         if op == 0x12 || op == 0x13 {
-            out.push(SourceLine { line_no, op, args: Vec::new() });
+            let mut data: Vec<u8> = Vec::new();
+            if let Some(tok) = tokens.get(args_offset) {
+                let stripped = tok.strip_prefix('s').unwrap_or(tok);
+                if stripped.len() % 2 != 0 {
+                    panic!(
+                        "line {}: opcode 0x{:02X} data token must have even hex digits, got '{}'",
+                        line_no, op, tok
+                    );
+                }
+                let mut i = 0;
+                while i < stripped.len() {
+                    let byte = u8::from_str_radix(&stripped[i..i+2], 16).unwrap_or_else(|_| {
+                        panic!("line {}: invalid hex byte in data '{}'", line_no, tok)
+                    });
+                    data.push(byte);
+                    i += 2;
+                }
+            }
+            out.push(SourceLine {
+                line_no, op, args: Vec::new(), data
+            });
             continue;
         }
         let mut args = Vec::with_capacity(tokens.len().saturating_sub(args_offset));
@@ -85,7 +107,7 @@ fn parse_inner(src: &str, vars: Option<&crate::variable::VarTable>) -> Vec<Sourc
             };
             args.push(val);
         }
-        out.push(SourceLine { line_no, op, args });
+        out.push(SourceLine { line_no, op, args, data: Vec::new() });
     }
     out
 }

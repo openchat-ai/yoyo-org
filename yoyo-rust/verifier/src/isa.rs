@@ -38,6 +38,8 @@ isaproc::isa! {
 0x0085 MEMCPYS dd ss sz  => load_state dd rdi  load_state ss rsi  movabs rcx sz  rep_movsb
 
 // ── Raw Data ────────────────────────────────────────────────────────
+0x0012 STRING_DEF => ; data definition, bytes flow via TirInst.data (no x64 emit)
+0x0013 RAW_DEF    => ; data definition, bytes flow via TirInst.data (no x64 emit)
 0x00A0 RAW_BYTE  byte  => raw_byte byte   ; emit single byte literal
 0x00A1 RAW_BYTES bytes => raw_bytes bytes ; emit block of literal bytes
 

@@ -171,6 +171,8 @@ fn tir_op_to_string(op: &TirOp) -> String {
         TirOp::LibyoyoExit { slot } => format!("libyoyo_exit state[0x{:02X}]", slot),
         TirOp::LibyoyoPrint { slot } => format!("libyoyo_print state[0x{:02X}]", slot),
         TirOp::LibyoyoTime { slot } => format!("libyoyo_time state[0x{:02X}]", slot),
+        TirOp::StringDef => "(str def)".to_string(),
+        TirOp::RawDef => "(raw def)".to_string(),
     }
 }
 
@@ -194,7 +196,7 @@ mod tests {
 
     #[test]
     fn hex_line_simple() {
-        let line = SourceLine { line_no: 1, op: 0x30, args: vec![0x50, 0x00] };
+        let line = SourceLine { line_no: 1, op: 0x30, args: vec![0x50, 0x00], data: Vec::new() };
         assert_eq!(hex_line(&line), "30 50 00");
     }
 

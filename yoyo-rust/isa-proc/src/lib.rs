@@ -58,6 +58,8 @@ fn mnemonic_to_variant(mnemonic: &str) -> String {
         "FCMP" => "Fcmp".to_string(),
         "RAW_BYTE" => "RawByte".to_string(),
         "RAW_BYTES" => "RawBytes".to_string(),
+        "STRING_DEF" => "StringDef".to_string(),
+        "RAW_DEF" => "RawDef".to_string(),
         "ALLOC" => "Alloc".to_string(),
         "LOADFILE" => "LoadFile".to_string(),
         "WRITEFILE" => "WriteFile".to_string(),

@@ -274,6 +274,14 @@ fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u
                 store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
             }
 
+            // ── Data Defs (Sub-exp B, 2026-07-15) ──
+            // STR/RAW DEF opcodes carry their bytes via TirInst.data (out-of-band
+            // channel — the ISApproc-generated emit pattern can't see Vec<u8>).
+            // Emit 0 x64 bytes for these — data is available via inst.data but
+            // not yet wired into the .data section (sub-C territory if needed).
+            TirOp::StringDef { .. } => { /* no x64 emit */ }
+            TirOp::RawDef { .. } => { /* no x64 emit */ }
+
             // ── HandlerStart (already handled above) ──
             TirOp::HandlerStart { .. } => unreachable!(),
 

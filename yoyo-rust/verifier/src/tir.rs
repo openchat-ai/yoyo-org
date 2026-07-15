@@ -35,6 +35,9 @@ pub struct TirInst {
     pub source_line: u32,
     pub op: isa::TirOp,
     pub byte_offset: Option<u32>,
+    /// Sub-exp B (2026-07-15): pass-through bytes for 0x12 STR / 0x13 RAW data-def
+    /// opcodes. Empty for non-data-def opcodes.
+    pub data: Vec<u8>,
 }
 
 /// Lower yoyo source lines into TIR instructions.
@@ -53,6 +56,7 @@ pub fn lower(source: &[crate::ty_parser::SourceLine]) -> Vec<TirInst> {
             source_line: line.line_no,
             op,
             byte_offset: None,
+            data: line.data.clone(),
         });
     }
     out
