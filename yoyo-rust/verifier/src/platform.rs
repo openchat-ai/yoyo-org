@@ -442,11 +442,22 @@ impl Platform for Win32Platform {
     }
 
     fn startup_blob(&self) -> &[u8] {
+        // Win32 startup sequence:
+        //   sub rsp, 8              ; align stack for call
+        //   mov r15, BSS_RVA        ; state base pointer (.bss section RVA, patched by pe_link)
+        //   call H_00               ; tail-call into user code
+        //   add rsp, 8
+        //   ret
+        //
+        // BSS_RVA placeholder is bytes 6..14 (inclusive), reserved for pe_link to
+        // patch with the actual .bss section RVA at link time.
         &[
-            0x48, 0x83, 0xEC, 0x08, // sub rsp, 8
-            0xE8, 0x00, 0x00, 0x00, 0x00, // call rel32 (patched to H_00)
-            0x48, 0x83, 0xC4, 0x08, // add rsp, 8
-            0xC3, // ret
+            0x48, 0x83, 0xEC, 0x08,             // sub rsp, 8
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA (placeholder)
+            0x00, 0x00, 0x00, 0x00,             //   ...8 bytes of IMM64 (to be patched)
+            0xE8, 0x00, 0x00, 0x00, 0x00,       // call rel32 (patched to H_00)
+            0x48, 0x83, 0xC4, 0x08,             // add rsp, 8
+            0xC3,                               // ret
         ]
     }
 }

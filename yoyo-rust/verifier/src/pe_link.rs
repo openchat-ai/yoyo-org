@@ -14,16 +14,30 @@ const FILE_ALIGN: u32 = 0x200;
 const SECTION_ALIGN: u32 = 0x1000;
 const IMAGE_BASE: u64 = 0x140_0000_0000;
 const TEXT_RVA: u32 = 0x1000;
+const BSS_RVA: u32 = 0x3000;       // .bss section RVA (zero-initialized, R/W)
+const BSS_VSIZE: u32 = 0x1000;     // 4096 bytes = 256 slots × 16 bytes headroom
+
+/// Win32 startup layout (must match Win32Platform::startup_blob):
+///   [0..3]   sub rsp, 8
+///   [4..13]  mov r15, BSS_ADDR     (movabs r15, imm64 — 10 bytes)
+///   [14..18] call rel32 (H_00)     (5 bytes)
+///   [19..22] add rsp, 8
+///   [23]     ret
+const WIN32_STARTUP_LEN: usize = 24;
+const MOV_R15_OFFSET: usize = 6;        // IMM64 bytes inside mov r15,imm64 (after 0x48 0xB8 prefix)
+const CALL_REL32_OFFSET: usize = 15;    // first byte of rel32 inside call (after E8 prefix)
 
 /// Build a PE32+ console executable.
 ///
-/// `startup` = platform startup blob (must end with call/jmp to H_00).
+/// `startup` = platform startup blob. Win32 startup is 24 bytes with two
+/// relocatable fields: `mov r15, BSS_ADDR` (8-byte imm64 at offset 6)
+/// and `call H_00` (4-byte rel32 at offset 15). Both are patched here.
 /// `handler_code` = emitted code for all handlers (H_00 starts at byte 0).
 ///
 /// The function:
-/// 1. Patches `startup`'s H_00 call rel32 to point to handler_code
+/// 1. Patches `startup`'s call-H_00 rel32 and mov-r15 imm64
 /// 2. Scans `handler_code` for `FF 15 ii 00 00 00` → collects IAT fixups
-/// 3. Builds .text section = startup + handler_code
+/// 3. Builds .text, .idata, .bss sections
 /// 4. Builds .idata section with import table for kernel32.dll
 /// 5. Patches FF 15 placeholders with correct RIP-relative disp32
 /// 6. Writes output PE file
@@ -32,7 +46,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let mut code = combined.bytes;
     let text_size = code.len() as u32;
 
-    let fixups = collect_iat_fixups(&code[startup.len()..], startup.len() as u32);
+    let fixups = collect_iat_fixups(&code[WIN32_STARTUP_LEN..], WIN32_STARTUP_LEN as u32);
     let unique = unique_apis(&fixups);
 
     let (idata_bytes, _iat_base_rva) = build_idata(&unique, TEXT_RVA + align_up(text_size, SECTION_ALIGN));
@@ -44,7 +58,6 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let idata_vsize = align_up(idata_bytes.len() as u32, SECTION_ALIGN);
     let idata_rva = TEXT_RVA + text_vsize;
     let idata_file_off = HEADERS_SIZE + text_fsize;
-    let total_size = idata_file_off + idata_fsize;
 
     // Patch FF 15 placeholders with correct RIP-relative displacements
     for &(code_off, api) in &fixups {
@@ -65,8 +78,11 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
         code[off..off + 4].copy_from_slice(&(disp32 as i32).to_le_bytes());
     }
 
+    // Compute SizeOfImage including .bss section
+    let size_of_image = align_up(BSS_RVA + BSS_VSIZE, SECTION_ALIGN);
+
     // Build PE
-    let mut pe = Vec::with_capacity((total_size + 0xFF) as usize);
+    let mut pe = Vec::with_capacity((idata_file_off as usize) + idata_fsize as usize + 0xFF);
 
     // ── DOS header ──
     pe.resize(0x40, 0);
@@ -77,7 +93,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // ── PE signature + COFF header ──
     pe.extend(b"PE\x00\x00");
     pe.extend(&0x8664u16.to_le_bytes()); // Machine: x86-64
-    pe.extend(&2u16.to_le_bytes());      // NumberOfSections
+    pe.extend(&3u16.to_le_bytes());      // NumberOfSections (.text + .idata + .bss)
     pe.extend(&0u32.to_le_bytes());      // TimeDateStamp
     pe.extend(&0u32.to_le_bytes());      // PointerToSymbolTable
     pe.extend(&0u32.to_le_bytes());      // NumberOfSymbols
@@ -87,34 +103,76 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
 
     // ── Optional header PE32+ ──
     let opt_start = pe.len() as u32;
-    pe.extend(&0x020Bu16.to_le_bytes()); // Magic
-    pe.extend(&[0u8; 18]);               // LMajor..SizeOfUninitializedData
+    pe.extend(&0x020Bu16.to_le_bytes()); // Magic (0x20B = PE32+)
+    // 16 zero bytes for: MajorLinkerVersion(1) + MinorLinkerVersion(1) +
+    //                    SizeOfCode(4) + SizeOfInitializedData(4) +
+    //                    SizeOfUninitializedData(4) + AddressOfEntryPoint(2 of u16 helper below)
+    // (We'll back-fill all of these explicitly below.)
+    pe.extend(&[0u8; 14]);               // fills up to AddressOfEntryPoint
 
-    // AddressOfEntryPoint (offset 0x10 from opt_start = file offset will be tracked)
+    // ── Fill in Standard Fields ──
+    // SizeOfCode (offset 0x04)
+    let soc_off = (opt_start + 0x04) as usize;
+    pe.resize(soc_off + 4, 0);
+    pe[soc_off..soc_off + 4].copy_from_slice(&text_fsize.to_le_bytes());
+
+    // SizeOfInitializedData (offset 0x08)
+    let soid_off = (opt_start + 0x08) as usize;
+    pe.resize(soid_off + 4, 0);
+    pe[soid_off..soid_off + 4].copy_from_slice(&idata_fsize.to_le_bytes());
+
+    // SizeOfUninitializedData (offset 0x0C) — leave as 0
+
+    // AddressOfEntryPoint (offset 0x10) = TEXT_RVA (startup code at .text head)
     let eop_off = (opt_start + 0x10) as usize;
     pe.resize(eop_off + 4, 0);
     pe[eop_off..eop_off + 4].copy_from_slice(&TEXT_RVA.to_le_bytes());
 
+    // BaseOfCode (offset 0x14)
     let base_code_off = (opt_start + 0x14) as usize;
     pe.resize(base_code_off + 4, 0);
     pe[base_code_off..base_code_off + 4].copy_from_slice(&TEXT_RVA.to_le_bytes());
 
+    // ImageBase (offset 0x18, u64)
     let img_base_off = (opt_start + 0x18) as usize;
     pe.resize(img_base_off + 8, 0);
     pe[img_base_off..img_base_off + 8].copy_from_slice(&IMAGE_BASE.to_le_bytes());
 
+    // SectionAlignment (offset 0x20)
     let sec_align_off = (opt_start + 0x20) as usize;
     pe.resize(sec_align_off + 4, 0);
     pe[sec_align_off..sec_align_off + 4].copy_from_slice(&SECTION_ALIGN.to_le_bytes());
 
+    // FileAlignment (offset 0x24)
     let file_align_off = (opt_start + 0x24) as usize;
     pe.resize(file_align_off + 4, 0);
     pe[file_align_off..file_align_off + 4].copy_from_slice(&FILE_ALIGN.to_le_bytes());
 
-    // SizeOfImage (offset 0x38)
+    // ── Windows-Specific Fields ──
+    // Major/Minor OS Version (offset 0x28-0x2B). Win64 loader may reject
+    // sub-5.2 OS version on console exes — use 6.0 (Win Vista+) which has
+    // well-tested ABI behavior.
+    let os_ver_off = (opt_start + 0x28) as usize;
+    pe.resize(os_ver_off + 4, 0);
+    pe[os_ver_off..os_ver_off + 2].copy_from_slice(&6u16.to_le_bytes()); // major 6
+    pe[os_ver_off + 2..os_ver_off + 4].copy_from_slice(&0u16.to_le_bytes()); // minor 0
+
+    // Major/Minor Image Version (offset 0x2C-0x2F) — 0.0 is fine
+    let img_ver_off = (opt_start + 0x2C) as usize;
+    pe.resize(img_ver_off + 4, 0);
+    // Already 0 from resize
+
+    // Major/Minor Subsystem Version (offset 0x30-0x33) — Win64 wants >= 5 (Win10)
+    let subsys_ver_off = (opt_start + 0x30) as usize;
+    pe.resize(subsys_ver_off + 4, 0);
+    pe[subsys_ver_off..subsys_ver_off + 2].copy_from_slice(&6u16.to_le_bytes());
+    pe[subsys_ver_off + 2..subsys_ver_off + 4].copy_from_slice(&0u16.to_le_bytes());
+
+    // Win32VersionValue (offset 0x34) — leave 0 (no extension used)
+
+    // SizeOfImage (offset 0x38) — already computed at function top (incl. .bss)
     let img_size_off = (opt_start + 0x38) as usize;
     pe.resize(img_size_off + 4, 0);
-    let size_of_image = TEXT_RVA + text_vsize + idata_vsize;
     pe[img_size_off..img_size_off + 4].copy_from_slice(&size_of_image.to_le_bytes());
 
     // SizeOfHeaders (offset 0x3C)
@@ -126,6 +184,36 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let subsys_off = (opt_start + 0x44) as usize;
     pe.resize(subsys_off + 2, 0);
     pe[subsys_off..subsys_off + 2].copy_from_slice(&3u16.to_le_bytes());
+
+    // DllCharacteristics (offset 0x46) — leave 0
+    let dllchars_off = (opt_start + 0x46) as usize;
+    pe.resize(dllchars_off + 2, 0);
+    // already 0
+
+    // SizeOfStackReserve (offset 0x48, u64) — Win64 default 1 MB
+    let stack_rsv_off = (opt_start + 0x48) as usize;
+    pe.resize(stack_rsv_off + 8, 0);
+    pe[stack_rsv_off..stack_rsv_off + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+
+    // SizeOfStackCommit (offset 0x50, u64) — 4 KB initial commit
+    let stack_cmt_off = (opt_start + 0x50) as usize;
+    pe.resize(stack_cmt_off + 8, 0);
+    pe[stack_cmt_off..stack_cmt_off + 8].copy_from_slice(&(4u64 << 10).to_le_bytes());
+
+    // SizeOfHeapReserve (offset 0x58, u64) — Win64 default 1 MB
+    let heap_rsv_off = (opt_start + 0x58) as usize;
+    pe.resize(heap_rsv_off + 8, 0);
+    pe[heap_rsv_off..heap_rsv_off + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+
+    // SizeOfHeapCommit (offset 0x60, u64) — 4 KB initial commit
+    let heap_cmt_off = (opt_start + 0x60) as usize;
+    pe.resize(heap_cmt_off + 8, 0);
+    pe[heap_cmt_off..heap_cmt_off + 8].copy_from_slice(&(4u64 << 10).to_le_bytes());
+
+    // LoaderFlags (offset 0x68, u32) — must be 0 (deprecated field)
+    let loader_off = (opt_start + 0x68) as usize;
+    pe.resize(loader_off + 4, 0);
+    // already 0
 
     // NumberOfRvaAndSizes (offset 0x6C)
     let nrvas_off = (opt_start + 0x6C) as usize;
@@ -143,31 +231,41 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let opt_end = (opt_start + sizeof_opt_hdr as u32) as usize;
     pe.resize(opt_end, 0);
 
-    // ── Section table ──
+    // ── Section table (must match NumberOfSections above = 3) ──
     // .text section
     write_section_header(&mut pe, b".text\x00\x00\x00", text_vsize, TEXT_RVA, text_fsize, HEADERS_SIZE, 0x60000020);
     // .idata section
     write_section_header(&mut pe, b".idata\x00\x00", idata_vsize, idata_rva, idata_fsize, idata_file_off, 0xC0000040);
+    // .bss section — uninitialized R/W (rawSize=0, zero-filled by loader)
+    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, 0u32, 0u32, 0xC0000080);
 
-    // Pad to HEADERS_SIZE
-    pe.resize(HEADERS_SIZE as usize, 0);
+    // Pad to HEADERS_SIZE — must accommodate 3 section headers (was 2):
+    //   headers = 0xD8 + 3 * 40 = 0xD8 + 0x78 = 0x150, align to 0x200
+    const HEADERS_SIZE_3: u32 = align_up(0xD8 + 3 * 40, FILE_ALIGN);
+    pe.resize(HEADERS_SIZE_3 as usize, 0);
 
     // ── .text section ──
     pe.extend(&code);
 
     // Pad to file alignment
-    let text_end = HEADERS_SIZE + text_fsize;
+    let text_end = HEADERS_SIZE_3 + text_fsize;
     pe.resize(text_end as usize, 0);
 
     // ── .idata section ──
     pe.extend(&idata_bytes);
+
+    // Pad to .idata section file end (file alignment boundary)
+    pe.resize(idata_file_off as usize + idata_fsize as usize, 0);
+
+    // .bss section has rawSize=0, so no file content to write.
+    // Win64 loader zero-fills the BSS region (VSize=0x1000 bytes).
 
     Ok(fs::write(out_path, &pe).map_err(|e| format!("write {}: {}", out_path.display(), e))?)
 }
 
 // ── Helper functions ────────────────────────────────────────────────
 
-const HEADERS_SIZE: u32 = align_up(0xD8 + 2 * 40, FILE_ALIGN); // = 0x200
+const HEADERS_SIZE: u32 = align_up(0xD8 + 3 * 40, FILE_ALIGN); // = 0x200 (still 0x200 since 3*40=0x78, 0xD8+0x78=0x150, ceil=0x200)
 
 const fn align_up(v: u32, a: u32) -> u32 {
     (v + a - 1) / a * a
@@ -184,35 +282,47 @@ fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
     combined.extend_from_slice(startup);
     combined.extend_from_slice(handler);
 
-    // Patch startup blob's H_00 call/jmp rel32.
-    // Win32: sub rsp, 8; E8 xx xx xx xx (call rel32); add rsp, 8; ret
-    // The call is at offset 4 (5 bytes). rel32 = handler_start - (call_addr + 5)
-    //   = startup.len() - (4 + 5) = startup.len() - 9
+    // Patch startup blob's Win32 fields:
+    //  1. mov r15, BSS_ADDRESS — IMM64 at offset 6..14
+    //  2. call rel32 H_00 — rel32 at offset 15..19
     //
-    // Linux: E9 xx xx xx xx (jmp rel32) at offset 0 (5 bytes).
-    //   rel32 = handler_start - (jmp_addr + 5)
-    //   = startup.len() - (0 + 5) = startup.len() - 5
+    // Linux jmp at offset 0 → rel32 at offset 1..5.
     //
-    // Detect which pattern: if startup starts with E9 → Linux jmp.
-    // If startup starts with 48 83 EC 08 → Win32 call (look for E8 after sub).
+    // Detect which by first byte:
+    //   - 0xE9 (jmp rel32) → Linux
+    //   - anything else (sub rsp, 8: 48 83 EC 08) → Win32
 
-    if startup.len() >= 5 {
-        if startup[0] == 0xE9 {
-            // Linux jmp at offset 0
-            let rel32 = startup.len() as i32 - 5;
-            if rel32 != 0 {
-                combined[1..5].copy_from_slice(&(rel32 as i32).to_le_bytes());
-            }
-        } else {
-            // Win32: find E8 (call) in the startup blob
-            for i in 0..startup.len().saturating_sub(4) {
-                if startup[i] == 0xE8 {
-                    let rel32 = startup.len() as i32 - (i as i32 + 5);
-                    if rel32 != 0 {
-                        combined[i + 1..i + 5].copy_from_slice(&(rel32 as i32).to_le_bytes());
-                    }
-                    break;
+    if startup.len() >= 5 && startup[0] == 0xE9 {
+        // Linux jmp at offset 0
+        let rel32 = startup.len() as i32 - 5;
+        if rel32 != 0 {
+            combined[1..5].copy_from_slice(&(rel32 as i32).to_le_bytes());
+        }
+    } else if startup.len() >= WIN32_STARTUP_LEN {
+        // Win32 startup: patch BOTH r15 IMM64 and call rel32
+        // r15 imm64 — IMAGE_BASE + BSS_RVA (absolute virtual address)
+        let r15_imm = IMAGE_BASE + BSS_RVA as u64;
+        combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
+            .copy_from_slice(&r15_imm.to_le_bytes());
+
+        // call rel32 — relative to next instruction
+        // Layout: E8 [rel32 LE] at combined offsets [14] [15..18]
+        // H_00 entry starts AT startup.len() (handler code begins right after startup).
+        // rel32 = H_00_offset - (E8_offset + 5) = startup.len() - 19
+        let rel32 = (startup.len() as i32) - ((CALL_REL32_OFFSET as i32) - 1 + 5);
+        if rel32 != 0 {
+            combined[CALL_REL32_OFFSET..CALL_REL32_OFFSET + 4]
+                .copy_from_slice(&(rel32 as i32).to_le_bytes());
+        }
+    } else {
+        // Legacy/fallback — find E8 (call) in the startup blob
+        for i in 0..startup.len().saturating_sub(4) {
+            if startup[i] == 0xE8 {
+                let rel32 = startup.len() as i32 - (i as i32 + 5);
+                if rel32 != 0 {
+                    combined[i + 1..i + 5].copy_from_slice(&(rel32 as i32).to_le_bytes());
                 }
+                break;
             }
         }
     }
