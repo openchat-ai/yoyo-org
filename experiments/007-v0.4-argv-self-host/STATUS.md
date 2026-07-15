@@ -1,50 +1,52 @@
-# v0.4 status (2026-07-15)
+# v0.4 FINAL status (2026-07-15)
 
-## 完成
+## ✅ Working
 
-### T2+T5+T6：verifier 改造
-- pe_link 5 bug 修：INT/IAT 8B、build_idata layout (var-length)、IAT scan arm、REX.B、dll_name_rva 变量名交换
+### T2+T5+T6 (verifier 改造)
+- GetCommandLineA 调通 (startup 调 kernel32 IAT, rax = PSTR cmdline)
+- pe_link 5 bug 修：INT/IAT 8B、build_idata var-length、IAT scan arm、REX.B (mov r15)、RVA 变量名交换
 - IatThunk +GetCommandLineA=15
-- str_idx → str_slot (u8→u16)：ISA 表 + emit + platform + render
-- Win32 startup 调用 GetCommandLineA：
-  - mov r15, BSS_RVA (虽然 BSS 不可写但 r15 作为兼容)
-  - sub rsp, 0x28 (shadow 0x20 + save slot 0x08)
-  - call [rip+rel] GetCommandLineA → rax = PSTR cmdline
-  - mov [rsp+0x20], rax (save in save slot — below caller's retaddr)
-  - add rsp, 0x28; lea rdi, [rsp-8] (rdi = &save_slot)
-  - sub rsp, 8; call rel32 H_00; add rsp, 8
-- **验证**：单 ret .ty 跑 exit = PSTR cmdline 地址（4998272 = 0x4C4E40 等）
+- str_idx → str_slot (u8→u16)：ISA + emit + platform + render 全同步
+- Win32 startup 48 字节: GetCommandLineA + 栈存 + rdi=&save_slot 传 H_00
+- H_50/H_51 改 rsi-arg: 路径从 RSI 寄存器，状态用 r12/r13/r14，返回 rax=contentBuf/rdx=fileSize
+- 测试 .ty 跑 exit = PSTR cmdline 地址
 
-### H_50/H_51 emit 改造（rsi-arg path）
-- emit_loadfile: 路径从 RSI 寄存器取（不再是 state[slot]）
-- emit_writefile: 路径从 RSI，内容从 r8，大小从 rdx
-- 内部状态用 r12/r13/r14（非易失 callee-saved）：
-  - r12 = hFile
-  - r13 = fileSize
-  - r14 = contentBuf
-- 返回：rax = contentBuf, rdx = fileSize
-- yoy0.ty v0.4 H_00 必须 push r12/r13/r14 on entry，pop on return
+### T7.5 (PE 装载器实验)
+- 实验 A: r15 + BSS_RVA (BSS 不可写 AV)
+- 实验 B: r15 + INITIALIZED_DATA + FSize=0x1000 + file content (AV)
+- 实验 C: SizeOfUninitializedData=0x1000 + DllCharacteristics=0x40 (DYNAMIC_BASE) + Subsystem=6.2 (AV)
+- **结论：Win10 minimal PE 不认 BSS**（多个变体都 AV）
 
-## 未完成（剩余工作）
+## ❌ 未完成
 
-### BSS 不可写（Win10 minimal PE）
-- 即使 `INITIALIZED_DATA + FSize=0x1000 + file content zeros` 仍 AV
-- Win10 loader 对 minimal PE 的 BSS 处理严格
+### T7.6 (yoy0.ty v0.4)
+MVP 需要：
+1. push r12, r13, r14 (H_50 clobbers them)
+2. sub rsp, 0x1000 (state buffer in stack)
+3. lea r15, [rsp+0x800] (state base in stack)
+4. parse cmdline to find argv[1] and argv[2]
+5. set rsi=argv[1], call H_50
+6. set rsi=argv[2], r8=contentBuf, rdx=fileSize, call H_51
+7. add rsp, 0x1000; pop r12, r13, r14; ret
 
-### yoy0.ty v0.4 未写
-- 需要 stack-relative state（不是 r15-based）
-- 需要 rsi 路径传递
-- 需要 cmdline 解析（"yoy0.exe input.ty output.exe" → argv[1], argv[2]）
-- 需要 H_50/H_51 调用的 register setup (rsi=path, push r12-r14, set r8=content, rdx=size)
-- ~150 行 .ty
+yoy0.ty v0.4 需 ~150 行 .ty 含 raw x86 bytes (00 00 A0 xx for each byte)。
 
-### 子项目
-- yoy0-js DDC 对齐 (Sub-005)
-- yoy0-asm DDC 对齐 (Sub-006)
-- M0→M1→M2 真实自举 (Sub-007 T7.4)
+## 已 commit
+
+- `493c4dd` experiments/007 plan
+- `48e0e42` T2+T5+T6 (verifier 改造)
+- `a558835` H_50/H_51 rsi-arg 改造
+- `63b1b75` C-route 实验 (BSS 仍然 AV)
 
 ## 决策
 
-- v0.4 不锁（用户选 2026-07-15）
-- Phase A GetCommandLineA 工作（基线）
-- H_50/H_51 路径从 rsi 取（避开 BSS）
+- v0.4 不锁 (用户选)
+- yoy0.ty v0.4 完整版 deferred 到下次 session (1-2 天)
+
+## 下次继续
+
+1. 写 yoy0.ty v0.4 MVP (50-100 行 .ty，raw bytes 实现)
+2. 测试 M1.exe input.ty output.exe 跑通
+3. (如果时间) M0→M1→M2 byte-equal 验证
+4. yoy0-js DDC 对齐 (Sub-005)
+5. yoy0-asm DDC 对齐 (Sub-006)
