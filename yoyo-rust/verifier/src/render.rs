@@ -1,4 +1,5 @@
 use crate::disasm::DisasmLine;
+use crate::emit::X86Chunk;
 use crate::isa::TirOp;
 use crate::tir::TirInst;
 use crate::ty_parser::SourceLine;
@@ -12,6 +13,7 @@ pub fn render_three_column(
     source: &[SourceLine],
     tir: &[TirInst],
     disasm: &[DisasmLine],
+    chunks: &[X86Chunk],
 ) -> String {
     let mut out = String::new();
 
@@ -24,7 +26,7 @@ pub fn render_three_column(
     out.push('\n');
 
     let mut tir_idx = 0;
-    let mut disasm_idx = 0;
+    let disasm_idx = 0;
 
     for line in source {
         let source_text = format!("Line {}: {}", line.line_no, hex_line(line));
@@ -40,12 +42,27 @@ pub fn render_three_column(
             String::from("(no TIR)")
         };
 
-        let chunks_for_line = chunks_for_source_line(&line_tirs);
-        let disasm_lines: Vec<&DisasmLine> = disasm.iter()
-            .skip(disasm_idx)
-            .take(chunks_for_line)
-            .collect();
-        let advance_disasm = disasm_lines.len();
+        // Sub-exp A: chunk-based disasm slicing
+        // Each X86Chunk corresponds to one TirInst (one source line may have multiple TirInsts).
+        // DisasmLines fall inside a chunk's [byte_offset, byte_offset+bytes.len()) range.
+        // We collect all disasm lines whose byte_offset falls inside any chunk of this source line.
+        let mut disasm_lines: Vec<&DisasmLine> = Vec::new();
+        let mut advance_disasm = 0usize;
+        for chunk in chunks.iter() {
+            if chunk.tir_source_line != line.line_no { continue; }
+            let chunk_end = chunk.byte_offset + chunk.bytes.len() as u32;
+            while disasm_idx + advance_disasm < disasm.len() {
+                let d = &disasm[disasm_idx + advance_disasm];
+                if d.byte_offset < chunk.byte_offset {
+                    // skip past stale disasm lines (shouldn't happen, but defensive)
+                    advance_disasm += 1;
+                    continue;
+                }
+                if d.byte_offset >= chunk_end { break; }
+                disasm_lines.push(d);
+                advance_disasm += 1;
+            }
+        }
 
         out.push_str(&format!(
             "{:<width1$}  {:<width2$}  {:<width3$}\n",
@@ -78,7 +95,6 @@ pub fn render_three_column(
         }
 
         tir_idx += advance_tir;
-        disasm_idx += advance_disasm;
     }
 
     out
@@ -158,64 +174,8 @@ fn tir_op_to_string(op: &TirOp) -> String {
     }
 }
 
-fn chunks_for_source_line(line_tirs: &[&TirInst]) -> usize {
-    let mut count = 0;
-    for inst in line_tirs {
-        count += match &inst.op {
-            TirOp::SetImm { .. } => 2,
-            TirOp::Get { .. } => 2,
-            TirOp::Inc { .. } => 3,
-            TirOp::Dec { .. } => 3,
-            TirOp::AddImm { .. } => 3,
-            TirOp::SubImm { .. } => 3,
-            TirOp::AddV { .. } => 4,
-            TirOp::SubV { .. } => 4,
-            TirOp::Imul { .. } => 4,
-            TirOp::Cmp { .. } => 3,
-            TirOp::CallHh { .. } => 1,
-            TirOp::JmpHh { .. } => 1,
-            TirOp::JeHh { .. } => 1,
-            TirOp::JneHh { .. } => 1,
-            TirOp::JlHh { .. } => 1,
-            TirOp::JgeHh { .. } => 1,
-            TirOp::JleHh { .. } => 1,
-            TirOp::JgHh { .. } => 1,
-            TirOp::JbHh { .. } => 1,
-            TirOp::JaeHh { .. } => 1,
-            TirOp::JbeHh { .. } => 1,
-            TirOp::JaHh { .. } => 1,
-            TirOp::HandlerStart { .. } => 0,
-            TirOp::Ret => 1,
-            TirOp::Ldb { .. } => 3,
-            TirOp::MemcpyData { .. } => 4,
-            TirOp::MemcpyState { .. } => 4,
-            TirOp::Alloc { .. } => 8,
-            TirOp::LoadFile { .. } => 24,
-            TirOp::WriteFile { .. } => 20,
-            TirOp::RawByte { .. } => 1,
-            TirOp::RawBytes { .. } => 1,
-            // libyoyo_* call sizes (Phase 4c):
-            // alloc: movabs rdi imm(10) + call_iat_thunk(6) + store_state(7) = 23
-            // free/close: load_state(7) + call_iat_thunk(6) = 13
-            // open: lea(7) + call_iat_thunk(6) + store_state(7) = 20
-            // read: load_state(7) + load_state(7) + movabs(10) + call_iat_thunk(6) + store_state(7) = 37
-            // write: load_state(7) + load_state(7) + movabs(10) + call_iat_thunk(6) = 30
-            // exit: load_state(7) + call_iat_thunk(6) + ret(1) = 14
-            // print: load_state(7) + call_iat_thunk(6) = 13
-            // time: call_iat_thunk(6) + store_state(7) = 13
-            TirOp::LibyoyoAlloc { .. } => 23,
-            TirOp::LibyoyoFree { .. } => 13,
-            TirOp::LibyoyoOpen { .. } => 20,
-            TirOp::LibyoyoRead { .. } => 37,
-            TirOp::LibyoyoWrite { .. } => 30,
-            TirOp::LibyoyoClose { .. } => 13,
-            TirOp::LibyoyoExit { .. } => 14,
-            TirOp::LibyoyoPrint { .. } => 13,
-            TirOp::LibyoyoTime { .. } => 13,
-        };
-    }
-    count
-}
+// Sub-exp A removed `chunks_for_source_line` (replaced by chunk-based disasm slicing in
+// render_three_column — see comment at use site).
 
 fn first_disasm_line(lines: &[&DisasmLine], _base_idx: usize) -> String {
     if lines.is_empty() {

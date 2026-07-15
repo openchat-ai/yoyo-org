@@ -92,18 +92,18 @@ fn run_decode(args: &[String]) {
     // Layer 2: lower to TIR
     let tir_program = tir::lower(&source);
 
-    // Layer 3: emit x86 bytes from TIR
-    let x86_program = emit::emit(&tir_program);
+    // Layer 3: emit x86 bytes from TIR (with chunks for accurate disasm alignment)
+    let (x86_bytes, chunks) = emit::emit_with_chunks(&tir_program);
 
     // Disassemble the x86 bytes for human-readable output
-    let disasm_program = disasm::disasm(&x86_program);
+    let disasm_program = disasm::disasm(&x86_bytes);
 
     // Render three-column output
-    let text = render::render_three_column(&source, &tir_program, &disasm_program);
+    let text = render::render_three_column(&source, &tir_program, &disasm_program, &chunks);
     print!("{}", text);
 
     eprintln!("\n# summary: {} source lines -> {} TIR ops -> {} x86 bytes",
-        source.len(), tir_program.len(), x86_program.len());
+        source.len(), tir_program.len(), x86_bytes.len());
 }
 
 fn run_diff(args: &[String]) {
