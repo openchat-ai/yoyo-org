@@ -130,6 +130,16 @@ pub fn lea_rsi_rip<const N: usize>(buf: &mut FixedBuf<N>, disp: i32) -> IsaResul
     buf.extend(&disp.to_le_bytes())
 }
 
+/// v0.4: Emit `lea reg, [r15 + slot*8]` for runtime-path str_slot support.
+/// Always disp32 (7B). Caller chooses `reg` (rcx for CreateFileA args, rdi for libyoyo_open).
+pub fn lea_reg_r15<const N: usize>(buf: &mut FixedBuf<N>, reg: Reg, slot: u16) -> IsaResult<()> {
+    let offset = (slot as u32) * 8;
+    buf.push(rex(true, reg.rex_r(), false, STATE_BASE.rex_b()))?;
+    buf.push(0x8D)?; // LEA
+    buf.push(modrm(2, reg.low3(), STATE_BASE.low3()))?;
+    buf.extend(&offset.to_le_bytes())
+}
+
 pub fn rep_movsb<const N: usize>(buf: &mut FixedBuf<N>) -> IsaResult<()> {
     buf.push(0xF3)?;
     buf.push(0xA4)

@@ -202,11 +202,12 @@ fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u
             TirOp::Alloc { slot, sz } => {
                 platform.emit_alloc(&mut buf, *slot as u16, *sz).unwrap();
             }
-            TirOp::LoadFile { slot, str_idx } => {
-                platform.emit_loadfile(&mut buf, *slot as u16, *str_idx as u8).unwrap();
+            TirOp::LoadFile { slot, str_slot } => {
+                // v0.4: str_slot = runtime state slot holding PSTR path
+                platform.emit_loadfile(&mut buf, *slot as u16, *str_slot as u16).unwrap();
             }
-            TirOp::WriteFile { id, str_idx, sz } => {
-                platform.emit_writefile(&mut buf, *id as u16, *str_idx as u8, *sz as u16).unwrap();
+            TirOp::WriteFile { id, str_slot, sz } => {
+                platform.emit_writefile(&mut buf, *id as u16, *str_slot as u16, *sz as u16).unwrap();
             }
 
             // ── libyoyo_* calls (Phase 4c) ──

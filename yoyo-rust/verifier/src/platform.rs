@@ -8,6 +8,7 @@ use crate::types::{FixedBuf, IsaResult, Reg};
 /// Layout:
 /// - 0..5:  legacy Win32 API calls (VirtualAlloc, CreateFileA, etc.)
 /// - 6..14: libyoyo_* calls (Phase 4c)
+/// - 15:    GetCommandLineA (v0.4 argv support, Phase 4c)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IatThunk {
@@ -26,9 +27,10 @@ pub enum IatThunk {
     LibyoyoExit = 12,
     LibyoyoPrint = 13,
     LibyoyoTime = 14,
+    GetCommandLineA = 15,
 }
 
-pub const NUM_IAT_THUNKS: usize = 15;
+pub const NUM_IAT_THUNKS: usize = 16;
 
 pub const IAT_THUNK_NAMES: [&str; NUM_IAT_THUNKS] = [
     "VirtualAlloc",
@@ -46,6 +48,7 @@ pub const IAT_THUNK_NAMES: [&str; NUM_IAT_THUNKS] = [
     "libyoyo_exit",
     "libyoyo_print",
     "libyoyo_time",
+    "GetCommandLineA",
 ];
 
 // Backward-compat alias - old code uses Win32Api name
@@ -67,8 +70,10 @@ pub trait Platform: Debug {
     fn name(&self) -> &'static str;
 
     fn emit_alloc<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, sz: u64) -> IsaResult<()>;
-    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_idx: u8) -> IsaResult<()>;
-    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_idx: u8, sz: u16) -> IsaResult<()>;
+    /// v0.4: `str_slot` (runtime state slot holding the path PSTR),
+    /// replacing legacy `str_idx` (compile-time string-table index).
+    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_slot: u16) -> IsaResult<()>;
+    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_slot: u16, sz: u16) -> IsaResult<()>;
     fn startup_blob(&self) -> &[u8];
 }
 
@@ -98,19 +103,19 @@ impl Platform for PlatformKind {
         }
     }
 
-    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_idx: u8) -> IsaResult<()> {
+    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_slot: u16) -> IsaResult<()> {
         match self {
-            PlatformKind::Win32 => Win32Platform.emit_loadfile(buf, slot, str_idx),
-            PlatformKind::Linux => LinuxPlatform.emit_loadfile(buf, slot, str_idx),
-            PlatformKind::Stub => StubPlatform.emit_loadfile(buf, slot, str_idx),
+            PlatformKind::Win32 => Win32Platform.emit_loadfile(buf, slot, str_slot),
+            PlatformKind::Linux => LinuxPlatform.emit_loadfile(buf, slot, str_slot),
+            PlatformKind::Stub => StubPlatform.emit_loadfile(buf, slot, str_slot),
         }
     }
 
-    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_idx: u8, sz: u16) -> IsaResult<()> {
+    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_slot: u16, sz: u16) -> IsaResult<()> {
         match self {
-            PlatformKind::Win32 => Win32Platform.emit_writefile(buf, id, str_idx, sz),
-            PlatformKind::Linux => LinuxPlatform.emit_writefile(buf, id, str_idx, sz),
-            PlatformKind::Stub => StubPlatform.emit_writefile(buf, id, str_idx, sz),
+            PlatformKind::Win32 => Win32Platform.emit_writefile(buf, id, str_slot, sz),
+            PlatformKind::Linux => LinuxPlatform.emit_writefile(buf, id, str_slot, sz),
+            PlatformKind::Stub => StubPlatform.emit_writefile(buf, id, str_slot, sz),
         }
     }
 
@@ -135,10 +140,10 @@ impl Platform for StubPlatform {
         // stub: set state[slot] = 0 (no real alloc)
         emit_st_loadfile(buf, 0, _slot)
     }
-    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, _str_idx: u8) -> IsaResult<()> {
+    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, _str_slot: u16) -> IsaResult<()> {
         emit_st_loadfile(buf, 0, slot)
     }
-    fn emit_writefile<const N: usize>(&self, _buf: &mut FixedBuf<N>, _id: u16, _str_idx: u8, _sz: u16) -> IsaResult<()> {
+    fn emit_writefile<const N: usize>(&self, _buf: &mut FixedBuf<N>, _id: u16, _str_slot: u16, _sz: u16) -> IsaResult<()> {
         // stub: no-op (success)
         Ok(())
     }
@@ -320,12 +325,12 @@ impl Platform for Win32Platform {
         Ok(())
     }
 
-    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, _str_idx: u8) -> IsaResult<()> {
+    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_slot: u16) -> IsaResult<()> {
         // state[slot]   = pointer to file content
         // state[slot+1] = file size
         //
-        // Sequence:
-        //   1. lea rcx, [rip+str]   (placeholder)
+        // v0.4 sequence (str_slot replaces compile-time str_idx):
+        //   1. lea rcx, [r15 + str_slot*8]    ; path PSTR from runtime state
         //   2. CreateFileA → hFile
         //   3. GetFileSize  → fileSize
         //   4. VirtualAlloc → contentBuf
@@ -335,8 +340,8 @@ impl Platform for Win32Platform {
         let hfile_slot = (slot + 2) as u8;  // temp slot for hFile
         let size_slot = (slot + 1) as u8;
 
-        // 1. Load filename pointer (placeholder, linker-patched)
-        lea_rcx_rip_placeholder(buf)?;
+        // 1. Load filename pointer from state[str_slot] (v0.4: runtime-derived path)
+        lea_reg_r15(buf, Reg::Rcx, str_slot)?;
 
         // 2. CreateFileA(rcx=filename, GENERIC_READ=0x80000000, FILE_SHARE_READ=1, NULL, OPEN_EXISTING=3, 0, NULL)
         movabs(buf, Reg::Rdx, 0x8000_0000u64)?;
@@ -393,20 +398,20 @@ impl Platform for Win32Platform {
         Ok(())
     }
 
-    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, _str_idx: u8, sz: u16) -> IsaResult<()> {
+    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_slot: u16, sz: u16) -> IsaResult<()> {
         // state[id] = buffer to write
         // state[sz] = number of bytes
         //
-        // Sequence:
-        //   1. lea rcx, [rip+str] (placeholder)
+        // v0.4 sequence (str_slot replaces compile-time str_idx):
+        //   1. lea rcx, [r15 + str_slot*8]    ; path PSTR from runtime state
         //   2. CreateFileA → hFile
         //   3. WriteFile
         //   4. CloseHandle
 
         let hfile_slot = (id + 1) as u8;
 
-        // 1. Load filename (placeholder)
-        lea_rcx_rip_placeholder(buf)?;
+        // 1. Load filename from state[str_slot] (v0.4: runtime-derived path)
+        lea_reg_r15(buf, Reg::Rcx, str_slot)?;
 
         // 2. CreateFileA(filename, GENERIC_WRITE=0x40000000, 0, NULL, CREATE_ALWAYS=2, 0, NULL)
         movabs(buf, Reg::Rdx, 0x4000_0000u64)?;
@@ -442,21 +447,32 @@ impl Platform for Win32Platform {
     }
 
     fn startup_blob(&self) -> &[u8] {
-        // Win32 startup sequence:
-        //   sub rsp, 8              ; align stack for call
-        //   mov r15, BSS_RVA        ; state base pointer (.bss section RVA, patched by pe_link)
-        //   call H_00               ; tail-call into user code
-        //   add rsp, 8
-        //   ret
+        // Win32 v0.4 startup (48 bytes — stack-argv pivot):
+        //   [0..1]     mov r15 prefix 0x49 0xB8
+        //   [2..9]     IMM64 placeholder (BSS_RVA — unused but kept for compat)
+        //   [10..13]   sub rsp, 0x28 (4B) — 0x20 shadow + 0x08 save slot
+        //   [14..19]   call [rip+rel] idx=15 GetCommandLineA (6B) → rax = PSTR cmdline
+        //   [20..24]   mov [rsp+0x20], rax (5B) — save cmdline below caller's retaddr
+        //   [25..28]   add rsp, 0x28 (4B)
+        //   [29..33]   lea rdi, [rsp-0x08] (5B) — rdi = &save_slot (PSTR cmdline pointer)
+        //   [34..37]   sub rsp, 0x08 (4B) — align stack for H_00 call
+        //   [38..42]   call rel32 (H_00); E8 at 38, rel32 at 39
+        //   [43..46]   add rsp, 0x08 (4B)
+        //   [47]       ret (1B)
         //
-        // BSS_RVA placeholder is bytes 6..14 (inclusive), reserved for pe_link to
-        // patch with the actual .bss section RVA at link time.
+        // H_00 receives rdi = &save_slot = pointer to PSTR cmdline in startup's frame.
+        // yoy0.ty v0.4 H_00 entry: parse cmdline at [rdi] for argv[1]/argv[2].
         &[
-            0x48, 0x83, 0xEC, 0x08,             // sub rsp, 8
-            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA (placeholder)
-            0x00, 0x00, 0x00, 0x00,             //   ...8 bytes of IMM64 (to be patched)
-            0xE8, 0x00, 0x00, 0x00, 0x00,       // call rel32 (patched to H_00)
-            0x48, 0x83, 0xC4, 0x08,             // add rsp, 8
+            0x49, 0xB8, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA (placeholder)
+            0x00, 0x00, 0x00, 0x00,             //
+            0x48, 0x83, 0xEC, 0x28,             // sub rsp, 0x28
+            0xFF, 0x15, 0x0F, 0x00, 0x00, 0x00, // call [rip+rel] idx=15 GetCommandLineA
+            0x48, 0x89, 0x44, 0x24, 0x20,       // mov [rsp+0x20], rax
+            0x48, 0x83, 0xC4, 0x28,             // add rsp, 0x28
+            0x48, 0x8D, 0x7C, 0x24, 0xF8,       // lea rdi, [rsp-0x08]
+            0x48, 0x83, 0xEC, 0x08,             // sub rsp, 0x08
+            0xE8, 0x00, 0x00, 0x00, 0x00,       // call rel32 (H_00)
+            0x48, 0x83, 0xC4, 0x08,             // add rsp, 0x08
             0xC3,                               // ret
         ]
     }
@@ -491,8 +507,8 @@ impl Platform for LinuxPlatform {
         Ok(())
     }
 
-    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, _str_idx: u8) -> IsaResult<()> {
-        lea_rdi_rip_placeholder(buf)?; // filename placeholder
+    fn emit_loadfile<const N: usize>(&self, buf: &mut FixedBuf<N>, slot: u16, str_slot: u16) -> IsaResult<()> {
+        lea_reg_r15(buf, Reg::Rdi, str_slot)?; // filename from runtime state
         movabs(buf, Reg::Rsi, 0)?; // O_RDONLY
         Self::linux_syscall(buf, 2)?; // open
         store_state(buf, 0, Reg::Rax)?; // state[0] = fd
@@ -522,8 +538,8 @@ impl Platform for LinuxPlatform {
         Ok(())
     }
 
-    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, _str_idx: u8, sz: u16) -> IsaResult<()> {
-        lea_rdi_rip_placeholder(buf)?; // filename placeholder
+    fn emit_writefile<const N: usize>(&self, buf: &mut FixedBuf<N>, id: u16, str_slot: u16, sz: u16) -> IsaResult<()> {
+        lea_reg_r15(buf, Reg::Rdi, str_slot)?; // filename from runtime state
         movabs(buf, Reg::Rsi, 0x241)?; // O_WRONLY|O_CREAT|O_TRUNC
         movabs(buf, Reg::Rdx, 0x1A4)?; // 0644
         Self::linux_syscall(buf, 2)?;

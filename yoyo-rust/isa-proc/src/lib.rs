@@ -6,6 +6,7 @@ use quote::quote;
 fn arg_rs_type(name: &str) -> &str {
     match name {
         "hh" | "cc" | "str_idx" => "u8",
+        "str_slot" => "u16",  // v0.4: runtime state slot holding PSTR path
         "oo" => "i32",
         "slot" | "dst" | "src" | "dd" | "ss" | "id" => "u16",
         _ => "u64",
@@ -16,6 +17,7 @@ fn arg_expr(index: usize, name: &str) -> proc_macro2::TokenStream {
     let i = index;
     match name {
         "hh" | "cc" | "str_idx" => quote! { args[#i] as u8 },
+        "str_slot" => quote! { args[#i] as u16 },
         "oo" => quote! { args[#i] as i32 },
         "slot" | "dst" | "src" | "dd" | "ss" | "id" => quote! { args[#i] as u16 },
         _ => quote! { args[#i] },

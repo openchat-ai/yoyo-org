@@ -17,15 +17,21 @@ const TEXT_RVA: u32 = 0x1000;
 const BSS_RVA: u32 = 0x3000;       // .bss section RVA (zero-initialized, R/W)
 const BSS_VSIZE: u32 = 0x1000;     // 4096 bytes = 256 slots × 16 bytes headroom
 
-/// Win32 startup layout (must match Win32Platform::startup_blob):
-///   [0..3]   sub rsp, 8
-///   [4..13]  mov r15, BSS_ADDR     (movabs r15, imm64 — 10 bytes)
-///   [14..18] call rel32 (H_00)     (5 bytes)
-///   [19..22] add rsp, 8
-///   [23]     ret
-const WIN32_STARTUP_LEN: usize = 24;
-const MOV_R15_OFFSET: usize = 6;        // IMM64 bytes inside mov r15,imm64 (after 0x48 0xB8 prefix)
-const CALL_REL32_OFFSET: usize = 15;    // first byte of rel32 inside call (after E8 prefix)
+/// Win32 v0.4 startup layout (48 bytes — stack-argv with safe save slot — see Win32Platform::startup_blob):
+///   [0..1]     mov r15 prefix 0x49 0xB8
+///   [2..9]     IMM64 placeholder for BSS_RVA (MOV_R15_OFFSET = 2)
+///   [10..13]   sub rsp, 0x28 (4B) — 0x20 shadow + 0x08 save slot
+///   [14..19]   call [rip+rel] GetCommandLineA (6B)
+///   [20..24]   mov [rsp+0x20], rax (5B) — save cmdline at [rsp+0x20] (below caller's retaddr)
+///   [25..28]   add rsp, 0x28 (4B)
+///   [29..33]   lea rdi, [rsp-0x8] (5B) — rdi = &save_slot (the cmdline PSTR is at this address)
+///   [34..37]   sub rsp, 8 (4B) — align for H_00 call
+///   [38..42]   call rel32 (H_00); E8 at 38, rel32 at 39
+///   [43..46]   add rsp, 8 (4B)
+///   [47]       ret (1B)
+const WIN32_STARTUP_LEN: usize = 48;
+const MOV_R15_OFFSET: usize = 2;
+const CALL_REL32_OFFSET: usize = 39;
 
 /// Build a PE32+ console executable.
 ///
@@ -46,7 +52,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let mut code = combined.bytes;
     let text_size = code.len() as u32;
 
-    let fixups = collect_iat_fixups(&code[WIN32_STARTUP_LEN..], WIN32_STARTUP_LEN as u32);
+    let fixups = collect_iat_fixups(&code, 0);
     let unique = unique_apis(&fixups);
 
     let (idata_bytes, _iat_base_rva) = build_idata(&unique, TEXT_RVA + align_up(text_size, SECTION_ALIGN));
@@ -185,7 +191,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(subsys_off + 2, 0);
     pe[subsys_off..subsys_off + 2].copy_from_slice(&3u16.to_le_bytes());
 
-    // DllCharacteristics (offset 0x46) — leave 0
+    // DllCharacteristics (offset 0x46) — leave 0 (no DYNAMIC_BASE / NX_COMPAT)
     let dllchars_off = (opt_start + 0x46) as usize;
     pe.resize(dllchars_off + 2, 0);
     // already 0
@@ -236,8 +242,10 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     write_section_header(&mut pe, b".text\x00\x00\x00", text_vsize, TEXT_RVA, text_fsize, HEADERS_SIZE, 0x60000020);
     // .idata section
     write_section_header(&mut pe, b".idata\x00\x00", idata_vsize, idata_rva, idata_fsize, idata_file_off, 0xC0000040);
-    // .bss section — uninitialized R/W (rawSize=0, zero-filled by loader)
-    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, 0u32, 0u32, 0xC0000080);
+    // .bss section — v0.4: provide FSize=BSS_VSIZE + PointerToRawData=idata_file_off+idata_fsize
+    // so the loader actually commits a R/W page. (UNINITIALIZED_DATA + FSize=0 hung on Win10.)
+    let bss_file_off = idata_file_off + idata_fsize;
+    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, 0u32, 0u32, 0xC0000080);  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
 
     // Pad to HEADERS_SIZE — must accommodate 3 section headers (was 2):
     //   headers = 0xD8 + 3 * 40 = 0xD8 + 0x78 = 0x150, align to 0x200
@@ -257,8 +265,8 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // Pad to .idata section file end (file alignment boundary)
     pe.resize(idata_file_off as usize + idata_fsize as usize, 0);
 
-    // .bss section has rawSize=0, so no file content to write.
-    // Win64 loader zero-fills the BSS region (VSize=0x1000 bytes).
+    // v0.4: BSS not used (argv on stack). Don't add any file content for BSS.
+    // .bss section is in headers only (VAddr 0x3000, VSize 0x1000, RawSize 0).
 
     Ok(fs::write(out_path, &pe).map_err(|e| format!("write {}: {}", out_path.display(), e))?)
 }
@@ -300,15 +308,11 @@ fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
         }
     } else if startup.len() >= WIN32_STARTUP_LEN {
         // Win32 startup: patch BOTH r15 IMM64 and call rel32
-        // r15 imm64 — IMAGE_BASE + BSS_RVA (absolute virtual address)
         let r15_imm = IMAGE_BASE + BSS_RVA as u64;
         combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
             .copy_from_slice(&r15_imm.to_le_bytes());
 
         // call rel32 — relative to next instruction
-        // Layout: E8 [rel32 LE] at combined offsets [14] [15..18]
-        // H_00 entry starts AT startup.len() (handler code begins right after startup).
-        // rel32 = H_00_offset - (E8_offset + 5) = startup.len() - 19
         let rel32 = (startup.len() as i32) - ((CALL_REL32_OFFSET as i32) - 1 + 5);
         if rel32 != 0 {
             combined[CALL_REL32_OFFSET..CALL_REL32_OFFSET + 4]
@@ -370,6 +374,7 @@ fn collect_iat_fixups(code: &[u8], code_base: u32) -> Vec<(u32, Win32Api)> {
                 12 => Win32Api::LibyoyoExit,
                 13 => Win32Api::LibyoyoPrint,
                 14 => Win32Api::LibyoyoTime,
+                15 => Win32Api::GetCommandLineA,
                 _ => return Vec::new(),
             };
             fixups.push((code_base + i as u32, api));
@@ -410,51 +415,59 @@ fn build_idata(unique: &[Win32Api], idata_rva: u32) -> (Vec<u8>, u32) {
     let n = unique.len();
     let mut bytes = Vec::new();
 
-    // RVA tracking
+    // Compute actual by_name block size (hint(2) + name + null) per API
+    let by_name_entry_sizes: Vec<u32> = unique.iter().map(|api| {
+        let name = WIN32_API_NAMES[*api as usize];
+        2 + name.len() as u32 + 1
+    }).collect();
+    let by_name_total_size: u32 = by_name_entry_sizes.iter().sum();
+
+    // RVA tracking — actual byte order below is:
+    //   [0..20]            desc 0 (20B)
+    //   [20..40]           desc 1 / terminator (20B)
+    //   [40..40+(n+1)*8]   INT (n+1 entries × 8B)
+    //   [..iat_rva+(n+1)*8] IAT (n+1 entries × 8B)
+    //   [..]+by_name_total_size  by_name entries (n entries × (2+name+1)B)
+    //   [+14]              "kernel32.dll\0" (14B)
     let desc_rva = idata_rva;
     let int_rva = desc_rva + 40;
     let iat_rva = int_rva + (n as u32 + 1) * 8;
-    // DLL name placed right after by_name entries
-    let dll_name_rva = iat_rva + (n as u32 + 1) * 8   // IAT
-        + n as u32 * (2 + 11 + 1);    // by_name (VirtualAlloc = longest at 11 chars)
-
-    // Function by_name entries start here
-    let func_names_start = dll_name_rva + 14; // "kernel32.dll\0"
+    // func_names_start = RVA of first by_name entry (immediately after IAT terminator)
+    let func_names_start = iat_rva + (n as u32 + 1) * 8;
+    // dll_name_rva = RVA of "kernel32.dll" string (immediately after by_name block)
+    let dll_name_rva = func_names_start + by_name_total_size;
 
     // Descriptor 0: kernel32.dll
     bytes.extend_from_slice(&int_rva.to_le_bytes());       // OriginalFirstThunk
     bytes.extend(&0u32.to_le_bytes());                     // TimeDateStamp
     bytes.extend(&0u32.to_le_bytes());                     // ForwarderChain
-    bytes.extend(&dll_name_rva.to_le_bytes());             // Name
-    bytes.extend(&iat_rva.to_le_bytes());                  // FirstThunk
+    bytes.extend(&dll_name_rva.to_le_bytes());             // Name → "kernel32.dll"
+    bytes.extend(&iat_rva.to_le_bytes());                  // FirstThunk → IAT
 
     // Descriptor 1: terminator
     bytes.extend(&[0u8; 20]);
 
-    // INT: n+1 entries
+    // INT: n+1 entries (PE32+ IMAGE_THUNK_DATA is 8 bytes per slot)
     for api in unique {
         let hint_name_rva = func_names_start + by_name_entry_offset(unique, *api, n);
-        bytes.extend(&hint_name_rva.to_le_bytes());
+        bytes.extend(&(hint_name_rva as u64).to_le_bytes());
     }
     bytes.extend(&0u64.to_le_bytes()); // terminator
 
     // IAT: n+1 entries (same as INT)
     for api in unique {
         let hint_name_rva = func_names_start + by_name_entry_offset(unique, *api, n);
-        bytes.extend(&hint_name_rva.to_le_bytes());
+        bytes.extend(&(hint_name_rva as u64).to_le_bytes());
     }
     bytes.extend(&0u64.to_le_bytes()); // terminator
 
     // IMAGE_IMPORT_BY_NAME entries: 2 bytes hint + function name + null
-    let mut by_name_offsets: Vec<u32> = Vec::new();
     for api in unique {
-        by_name_offsets.push(bytes.len() as u32);
         bytes.extend(&0u16.to_le_bytes()); // Hint
         let name = WIN32_API_NAMES[*api as usize];
         bytes.extend(name.as_bytes());
         bytes.push(0); // null terminator
     }
-    // by_name_entry_offset returns the offset within the by_name block, so meh.
 
     // DLL name
     bytes.extend(b"kernel32.dll");

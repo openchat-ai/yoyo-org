@@ -56,7 +56,7 @@ isaproc::isa! {
 
 // ── Legacy Syscall / Complex (deprecated by libyoyo_* above) ───────────
 0x0020 ALLOC slot sz      => emit_alloc slot sz     ; VirtualAlloc (via platform) - deprecated
-0x0050 LOADFILE slot str_idx => emit_loadfile slot str_idx  ; ReadFile (via platform) - deprecated
-0x0051 WRITEFILE id str_idx sz => emit_writefile id str_idx sz  ; CreateFile+WriteFile+Close (via platform) - deprecated
+0x0050 LOADFILE slot str_slot => emit_loadfile slot str_slot  ; v0.4: str_slot = runtime state slot for path
+0x0051 WRITEFILE id str_slot sz => emit_writefile id str_slot sz  ; v0.4: str_slot for path, sz slot for byte count
 
 } // isa!

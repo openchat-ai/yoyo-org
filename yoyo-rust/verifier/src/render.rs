@@ -154,11 +154,11 @@ fn tir_op_to_string(op: &TirOp) -> String {
         TirOp::Alloc { slot, sz } => {
             format!("alloc state[0x{:02X}], 0x{:X}", slot, sz)
         }
-        TirOp::LoadFile { slot, str_idx } => {
-            format!("loadfile state[0x{:02X}], str_idx={}", slot, str_idx)
+        TirOp::LoadFile { slot, str_slot } => {
+            format!("loadfile state[0x{:02X}], str_slot=state[0x{:02X}]", slot, str_slot)
         }
-        TirOp::WriteFile { id, str_idx, sz } => {
-            format!("writefile state[0x{:02X}], str_idx={}, sz=state[0x{:02X}]", id, str_idx, sz)
+        TirOp::WriteFile { id, str_slot, sz } => {
+            format!("writefile state[0x{:02X}], str_slot=state[0x{:02X}], sz=state[0x{:02X}]", id, str_slot, sz)
         }
         TirOp::RawByte { byte } => format!("raw_byte 0x{:02X}", byte),
         TirOp::RawBytes { bytes } => format!("raw_bytes count={}", bytes),
