@@ -263,7 +263,8 @@ mod platform {
                      lpNumberOfBytesWritten: *mut u32, lpOverlapped: *mut u8) -> i32;
         fn CloseHandle(hObject: i32) -> i32;
         fn ExitProcess(uExitCode: u32) -> !;
-        fn WriteFile_StdOut() -> i32;  // simplified
+        // WriteFile_StdOut: removed (use WriteFile with GetStdHandle(-11) instead)
+        fn GetStdHandle(nStdHandle: i32) -> *mut u8;
         fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut u8) -> i32;
     }
 
@@ -326,7 +327,8 @@ mod platform {
         while *s.add(len) != 0 { len += 1; }
         // Get stdout handle (simplified �?use STD_OUTPUT_HANDLE = -11)
         // In real impl: GetStdHandle(-11)
-        WriteFile_StdOut();  // placeholder
+        let stdout = GetStdHandle(-11i32) as i32;
+        WriteFile(stdout, s, len as u32, 0 as *mut u32, 0 as *mut u8);
     }
 
     #[no_mangle]
