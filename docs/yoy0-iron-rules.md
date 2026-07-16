@@ -121,4 +121,35 @@ yoy0.exe 包含 SET (0x30) 和 RET (0xFF) 的 emit 字节
 
 ---
 
-*此文档是 yoy0.ty v0.1 的宪法。所有后续 v0.X 必须遵守。*
+## v0.4 偏离 (2026-07-16)
+
+v0.4 是 yoy0 v0.1 的演进版,做了以下**有意偏离**(见 `experiments/007-v0.4-argv-self-host/STATUS.md`):
+
+| 铁律 | v0.4 状态 | 偏离原因 |
+|------|-----------|----------|
+| 1 (零引用 input.ky) | ✅ 仍适用 | v0.4 用 argv[1]/argv[2],不引用 input.ky |
+| 2 (零自动重写) | ✅ 仍适用 | v0.4 仍手写 |
+| 3 (4 bounded context L/S/E/O) | ⚠️ 部分适用 | v0.4 只 L (H_50) + O (H_51),无 S/E;deferred |
+| 4-5 (聚合根/统一语言) | ✅ 仍适用 | |
+| 6-7 (24 位格式) | ✅ 仍适用 | v0.4 用 24 位 + 00 00 A0 xx raw-byte 模式 |
+| 8 (slot = pointer) | ✅ 仍适用 | |
+| **9 (R15 = 状态基址 on BSS)** | ❌ **已偏离** | v0.4 用栈: `sub rsp, 0x1000; lea r15, [rsp+0x800]`<br>**原因**: T7.5 PE 装载器实验 A/B/C 全 AV — Win10 minimal PE 不认 BSS |
+| 10-11 (静态分配 + 关闭=释放) | ✅ 仍适用 | 0x1000 栈 frame 是编译期固定 |
+| **12 (Result 链 + trit sentinel)** | ❌ **未实现** | v0.4 无 H_30 emitter / scanner / trit 状态机 |
+| **13 (缓冲区边界检查)** | ❌ **未实现** | v0.4 H_00 直接 push/sub,无 budget 检查 |
+| **14 (Self-test on startup)** | ❌ **未实现** | v0.4 启动直接 GetCommandLineA + call H_00 |
+| **15-16, 19 (三进制 trit)** | ❌ **未实现** | v0.4 没 scanner |
+| **17 (3-chain DDC)** | ❌ **不可达** | v0.4 还不能 self-host,无法 byte-equal |
+| 18 (行数 < 1500) | ✅ 暂适用 | v0.4 现在 212 行,完整 MVP 估 ~600 行 |
+| (v0.1) H_50 = load input.ky | ❌ **已偏离** | v0.4 rsi-arg (path 来自 argv[1]) |
+| (v0.1) H_51 = write output.exe | ❌ **已偏离** | v0.4 rsi-arg (path 来自 argv[2]) |
+| (v0.1) 4KB heap / 1MB code / 64KB data | ❌ **已偏离** | v0.4 用 0x1000 栈,无独立 heap |
+| (v0.1) hardcoded 4-byte input | ❌ **已偏离** | v0.4 argv-aware,文件大小由 GetFileSize 决定 |
+
+**v0.4 仍属于 yoy0 项目**,但只实现了 Loader (L) + Output (O)。完整 v0.4 + Scanner (S) + Emitter (E) 是 1-2 天 deferred 工作,见 STATUS.md。
+
+**v0.4 不锁** — 用户选 7/15 决定。完整版收敛到 v1.0 再 lockdown。
+
+---
+
+*此文档是 yoy0.ty v0.1 的宪法。所有后续 v0.X 必须遵守(标注"已偏离"的除外)。*
