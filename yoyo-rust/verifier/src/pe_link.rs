@@ -10,11 +10,14 @@ use crate::platform::{Win32Api, NUM_WIN32_APIS, WIN32_API_NAMES};
 
 // ── PE constants ────────────────────────────────────────────────────
 
-const FILE_ALIGN: u32 = 0x200;
+const FILE_ALIGN: u32 = 0x400;
 const SECTION_ALIGN: u32 = 0x1000;
 const IMAGE_BASE: u64 = 0x140_0000_0000;
 const TEXT_RVA: u32 = 0x1000;
 const BSS_RVA: u32 = 0x3000;       // .bss section RVA (zero-initialized, R/W)
+                                  // Note: in v0.4 (stack-state), BSS is unused; H_00 overwrites r15 with lea rsp+0x800
+                                  // We still emit the section so PE linker IAT/relocations work, but its RVA
+                                  // overlaps with .text — keep BSS_RVA so any legacy references still compile.
 const BSS_VSIZE: u32 = 0x1000;     // 4096 bytes = 256 slots × 16 bytes headroom
 
 /// Win32 v0.4 startup layout — see Win32Platform::startup_blob.
@@ -154,15 +157,17 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let fixups = collect_iat_fixups(&code, 0);
     let unique = unique_apis(&fixups);
 
-    let (idata_bytes, _iat_base_rva) = build_idata(&unique, TEXT_RVA + align_up(text_size, SECTION_ALIGN));
-
     let text_vsize = align_up(text_size, SECTION_ALIGN);
     let text_fsize = align_up(text_size, FILE_ALIGN);
-    let idata_fsize = align_up(idata_bytes.len() as u32, FILE_ALIGN);
-
-    let idata_vsize = align_up(idata_bytes.len() as u32, SECTION_ALIGN);
     let idata_rva = TEXT_RVA + text_vsize;
+    let (idata_bytes, _iat_base_rva) = build_idata(&unique, idata_rva);
+    let idata_fsize = align_up(idata_bytes.len() as u32, FILE_ALIGN);
+    let idata_vsize = align_up(idata_bytes.len() as u32, SECTION_ALIGN);
     let idata_file_off = HEADERS_SIZE + text_fsize;
+    // BSS section RVA: place after .idata to avoid overlap with .text.
+    // (v0.4 stack-state doesn't actually use BSS, but the section header
+    // is kept for PE compatibility.)
+    let bss_rva = align_up(idata_rva + idata_vsize, SECTION_ALIGN);
 
     // Patch FF 15 placeholders with correct RIP-relative displacements
     for &(code_off, api) in &fixups {
@@ -183,8 +188,13 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
         code[off..off + 4].copy_from_slice(&(disp32 as i32).to_le_bytes());
     }
 
-    // Compute SizeOfImage including .bss section
-    let size_of_image = align_up(BSS_RVA + BSS_VSIZE, SECTION_ALIGN);
+    // Compute SizeOfImage covering all sections (.text + .idata + .bss).
+    // Must be the highest RVA + virtual size, aligned to SECTION_ALIGN.
+    let size_of_image = align_up(
+        std::cmp::max(idata_rva + idata_vsize, bss_rva + BSS_VSIZE)
+            .max(TEXT_RVA + text_vsize),
+        SECTION_ALIGN,
+    );
 
     // Build PE
     let mut pe = Vec::with_capacity((idata_file_off as usize) + idata_fsize as usize + 0xFF);
@@ -347,7 +357,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     // .bss section — v0.4: provide FSize=BSS_VSIZE + PointerToRawData=idata_file_off+idata_fsize
     // so the loader actually commits a R/W page. (UNINITIALIZED_DATA + FSize=0 hung on Win10.)
     let bss_file_off = idata_file_off + idata_fsize;
-    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, BSS_RVA, BSS_VSIZE, idata_file_off + idata_fsize, 0xC0000040);  // v0.4 alt: FSize=BSS_VSIZE + INITIALIZED_DATA + DYNAMIC_BASE + SizeOfUninitializedData  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
+    write_section_header(&mut pe, b".bss\x00\x00\x00\x00", BSS_VSIZE, bss_rva, BSS_VSIZE, idata_file_off + idata_fsize, 0xC0000040);  // v0.4 alt: FSize=BSS_VSIZE + INITIALIZED_DATA + DYNAMIC_BASE + SizeOfUninitializedData  // v0.4 revert: BSS uninit, FSize=0 (BSS isn't actually used for state — argv on stack)
 
     // Pad to HEADERS_SIZE — must accommodate 3 section headers (was 2):
     //   headers = 0xD8 + 3 * 40 = 0xD8 + 0x78 = 0x150, align to 0x200
@@ -417,7 +427,10 @@ fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
     } else {
         // Find 0x49 0xBF (mov r15, imm64) and patch the IMM64 field
         if startup.len() >= 10 && startup[0] == 0x49 && startup[1] == 0xBF {
-            let r15_imm = IMAGE_BASE + BSS_RVA as u64;
+            // v0.4: r15 is overwritten by H_00 via `lea r15, [rsp+0x800]`,
+            // so this MOV is effectively a no-op. Patch with 0 to avoid
+            // creating a dependency on .bss layout for the startup code.
+            let r15_imm: u64 = 0;
             combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
                 .copy_from_slice(&r15_imm.to_le_bytes());
         }
@@ -494,6 +507,11 @@ fn unique_apis(fixups: &[(u32, Win32Api)]) -> Vec<Win32Api> {
     let mut seen = [false; NUM_WIN32_APIS];
     let mut result = Vec::new();
     for &(_, api) in fixups {
+        // Skip libyoyo_* APIs: they live in libyoyo.dll which we don't bundle.
+        // (Patched calls will fail at runtime, but kernel32.dll imports resolve.)
+        if api as u8 >= 6 && api as u8 <= 14 {
+            continue;
+        }
         let idx = api as usize;
         if !seen[idx] {
             seen[idx] = true;
