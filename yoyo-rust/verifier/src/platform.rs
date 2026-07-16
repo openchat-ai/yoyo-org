@@ -399,10 +399,10 @@ impl Platform for Win32Platform {
         call_iat_thunk(buf, Win32Api::CloseHandle)?;
         shadow_ret(buf)?;
 
-        // 7. Return: rax = contentBuf, rdx = fileSize
+        // 7. Return: rax = contentBuf, rdx = fileSize (fall through, no ret — inline code)
         mov_r_r(buf, Reg::Rax, Reg::R14)?;
         mov_r_r(buf, Reg::Rdx, Reg::R13)?;
-        // Pop callee-saved
+        // Pop callee-saved (no ret — inline code falls through to next instruction)
         buf.push(0x41)?; buf.push(0x5E)?; // pop r14
         buf.push(0x41)?; buf.push(0x5D)?; // pop r13
         buf.push(0x41)?; buf.push(0x5C)?; // pop r12
@@ -424,15 +424,21 @@ impl Platform for Win32Platform {
         let _ = id;       // ignored
         let _ = sz;       // ignored
 
-        // Push callee-saved (r12 used internally as hFile scratch)
+        // Push callee-saved (r12=hFile, r13=contentBuf, r14=fileSize)
         buf.push(0x41)?; buf.push(0x54)?; // push r12
+        buf.push(0x41)?; buf.push(0x5D)?; // push r13
+        buf.push(0x41)?; buf.push(0x56)?; // push r14
+
+        // Save caller's contentBuf (rdx) and fileSize (r8) before CreateFileA clobbers them
+        mov_r_r(buf, Reg::R13, Reg::Rdx)?; // r13 = contentBuf
+        mov_r_r(buf, Reg::R14, Reg::R8)?;  // r14 = fileSize
 
         // 1. Path from RSI
         mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
 
         // 2. CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)
         movabs(buf, Reg::Rdx, 0x4000_0000u64)?;
-        movabs(buf, Reg::R8, 0)?;
+        movabs(buf, Reg::R8, 0)?;  // dwShareMode = 0
         movabs(buf, Reg::R9, 0)?;
         movabs(buf, Reg::Rax, 2)?; // CREATE_ALWAYS
         buf.push(0x50)?;
@@ -443,9 +449,10 @@ impl Platform for Win32Platform {
         // hFile in r12
         mov_r_r(buf, Reg::R12, Reg::Rax)?;
 
-        // 3. WriteFile(hFile=r12, contentBuf=rdx, fileSize=r8)
-        // Caller protocol: r8 = fileSize, rdx = contentBuf
+        // 3. WriteFile(hFile=r12, contentBuf=r13, fileSize=r14)
         mov_r_r(buf, Reg::Rcx, Reg::R12)?;
+        mov_r_r(buf, Reg::Rdx, Reg::R13)?;  // contentBuf from saved r13
+        mov_r_r(buf, Reg::R8, Reg::R14)?;   // fileSize from saved r14
         movabs(buf, Reg::R9, 0)?;
         movabs(buf, Reg::Rax, 0)?;
         buf.push(0x50)?;
@@ -461,6 +468,8 @@ impl Platform for Win32Platform {
         shadow_ret(buf)?;
 
         // Pop callee-saved
+        buf.push(0x41)?; buf.push(0x5E)?; // pop r14
+        buf.push(0x41)?; buf.push(0x5D)?; // pop r13
         buf.push(0x41)?; buf.push(0x5C)?; // pop r12
         Ok(())
     }

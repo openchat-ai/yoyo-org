@@ -51,131 +51,117 @@
 00 00 A0 00
 00 00 A0 00
 
-; mov rsi, [rdi]
+; mov rsi, [rdi]  — rsi = PSTR cmdline (writable, user-mode heap)
 00 00 A0 48
 00 00 A0 8B
 00 00 A0 37
 
-; Copy cmdline to stack at [rsp+0x900] (safe scratch in our 0x1000 frame)
-; Use rsi = cmdline, rdi = rsp+0x900, rcx = 0x400 bytes
-; lea rdi, [rsp+0x900]  ; 48 8D BC 24 00 09 00 00
+; Copy cmdline to stack at [rsp+0x100] using mov/inc loop (safe copy avoids rep movsb issues)
+; lea rdi, [rsp+0x100]  ; 48 8D BC 24 00 01 00 00
 00 00 A0 48
 00 00 A0 8D
 00 00 A0 BC
 00 00 A0 24
 00 00 A0 00
-00 00 A0 09
+00 00 A0 01
 00 00 A0 00
 00 00 A0 00
-; mov ecx, 0x400  ; B9 00 04 00 00
-00 00 A0 B9
-00 00 A0 00
-00 00 A0 04
-00 00 A0 00
-00 00 A0 00
-; rep movsb  ; F3 A4
-00 00 A0 F3
-00 00 A0 A4
-; rsi = rsp+0x900 (start of copy in stack)
+; .copy_loop: mov al, [rsi]  ; 8A 06 (2B)
+00 00 A0 8A
+00 00 A0 06
+; mov [rdi], al  ; 88 07 (2B)
+00 00 A0 88
+00 00 A0 07
+; test al, al  ; 84 C0 (2B)
+00 00 A0 84
+00 00 A0 C0
+; jz .copy_done  ; 74 02 (2B)
+00 00 A0 74
+00 00 A0 02
+; inc rsi  ; 48 FF C6 (3B)
+00 00 A0 48
+00 00 A0 FF
+00 00 A0 C6
+; inc rdi  ; 48 FF C7 (3B)
+00 00 A0 48
+00 00 A0 FF
+00 00 A0 C7
+; jmp .copy_loop  ; EB F0 (target 0, disp = 0-16 = -16)
+00 00 A0 EB
+00 00 A0 F0
+; .copy_done: ; reset rsi = rsp+0x100 (start of copy in stack)
 00 00 A0 48
 00 00 A0 8D
 00 00 A0 B4
 00 00 A0 24
 00 00 A0 00
-00 00 A0 09
+00 00 A0 01
 00 00 A0 00
 00 00 A0 00
 
-; === Argv parser (raw x86, 72 bytes) ===
-; offset 0: movzx eax, byte [rsi]  ; 0F B6 06
-00 00 A0 0F
-00 00 A0 B6
-00 00 A0 06
-; offset 3: test al, al  ; 84 C0
-00 00 A0 84
-00 00 A0 C0
-; offset 5: jz .done (target 72, disp = 65 = 0x41)
-00 00 A0 74
-00 00 A0 41
-; offset 7: cmp al, 0x20  ; 3C 20
-00 00 A0 3C
+; === Argv parser (raw x86, 38 bytes): scan+null-term spaces in stack copy ===
+; Scan loop 0: find space after argv[0], null-terminate it
+; offset 0: cmp byte [rsi], 0x20  ; 80 3E 20  (3B)
+00 00 A0 80
+00 00 A0 3E
 00 00 A0 20
-; offset 9: je .skip1_end (target 17, disp = 6 = 0x06)
+; offset 3: je .null0  (target 10, disp = 10-5 = 5 = 0x05)
 00 00 A0 74
-00 00 A0 06
-; offset 11: inc rsi  ; 48 FF C6
+00 00 A0 05
+; offset 5: inc rsi  ; 48 FF C6  (3B)
 00 00 A0 48
 00 00 A0 FF
 00 00 A0 C6
-; offset 14: jmp .skip1 (target 0, disp = -16 = 0xF0)
+; offset 8: jmp .scan0  (target 0, disp = 0-10 = -10 = 0xF6)
 00 00 A0 EB
-00 00 A0 F0
-; offset 16: .skip1_end: movzx eax, byte [rsi]
-00 00 A0 0F
-00 00 A0 B6
+00 00 A0 F6
+; offset 10: .null0: mov byte [rsi], 0  ; C6 06 00 (3B)
+00 00 A0 C6
 00 00 A0 06
-; offset 19: cmp al, 0x20
-00 00 A0 3C
-00 00 A0 20
-; offset 21: jne .argv1_start (target 30, disp = 7 = 0x07)
-00 00 A0 75
-00 00 A0 07
-; offset 23: inc rsi
+00 00 A0 00
+; offset 13: inc rsi  ; 48 FF C6 (3B) — skip past the null, now at argv[1]
 00 00 A0 48
 00 00 A0 FF
 00 00 A0 C6
-; offset 26: jmp .skip1_end (target 16, disp = -12 = 0xF4)
-00 00 A0 EB
-00 00 A0 F4
-; offset 28: .argv1_start: mov r12, rsi  ; 49 89 F4
+; offset 16: .argv1_start: mov r12, rsi  ; 49 89 F4 (3B)
 00 00 A0 49
 00 00 A0 89
 00 00 A0 F4
-; offset 31: .end2: movzx eax, byte [rsi]
-00 00 A0 0F
-00 00 A0 B6
-00 00 A0 06
-; offset 34: test al, al
-00 00 A0 84
-00 00 A0 C0
-; offset 36: jz .argv2_done (target 72, disp = 34 = 0x22)
-00 00 A0 74
-00 00 A0 22
-; offset 38: cmp al, 0x20
-00 00 A0 3C
+; Scan loop 1: find space after argv[1], null-terminate it
+; Also check for null (end of cmdline — no argv[2])
+; offset 19: cmp byte [rsi], 0x20  ; 80 3E 20 (3B)
+00 00 A0 80
+00 00 A0 3E
 00 00 A0 20
-; offset 40: je .skip3 (target 53, disp = 11 = 0x0B)
+; offset 22: je .null1  (target 34, disp = 34-24 = 10 = 0x0A)
+00 00 A0 74
+00 00 A0 0A
+; offset 24: cmp byte [rsi], 0  ; 80 3E 00 (3B)
+00 00 A0 80
+00 00 A0 3E
+00 00 A0 00
+; offset 27: je .no_argv2  (target 40, disp = 40-29 = 11 = 0x0B)
 00 00 A0 74
 00 00 A0 0B
-; offset 42: inc rsi (skip space, do NOT null-terminate — cmdline is OS read-only!)
+; offset 29: inc rsi  ; 48 FF C6 (3B)
 00 00 A0 48
 00 00 A0 FF
 00 00 A0 C6
-; offset 45: jmp .end2 (target 31, disp = 31-47 = -16 = 0xF0)
+; offset 32: jmp .scan1  (target 19, disp = 19-34 = -15 = 0xF1)
 00 00 A0 EB
-00 00 A0 F0
-; offset 47: .skip3: movzx eax, byte [rsi]
-00 00 A0 0F
-00 00 A0 B6
+00 00 A0 F1
+; offset 34: .null1: mov byte [rsi], 0  ; C6 06 00 (3B)
+00 00 A0 C6
 00 00 A0 06
-; offset 50: cmp al, 0x20
-00 00 A0 3C
-00 00 A0 20
-; offset 52: jne .argv2_start (target 60, disp = 60-54 = 6 = 0x06)
-00 00 A0 75
-00 00 A0 06
-; offset 54: inc rsi
+00 00 A0 00
+; offset 37: inc rsi  ; 48 FF C6 (3B) — skip past null, now at argv[2]
 00 00 A0 48
 00 00 A0 FF
 00 00 A0 C6
-; offset 57: jmp .skip3 (target 47, disp = 47-59 = -12 = 0xF4)
-00 00 A0 EB
-00 00 A0 F4
-; offset 59: .argv2_start: mov r13, rsi  ; 49 89 F5
+; offset 40: .no_argv2: mov r13, rsi  ; 49 89 F5 (3B)
 00 00 A0 49
 00 00 A0 89
 00 00 A0 F5
-; offset 62: .argv2_done:
 
 ; === H_50: load input.ty (rsi=argv[1] = r12) ===
 00 00 A0 4C
@@ -184,10 +170,11 @@
 00 00 50 00 00 00
 ; After: rax = contentBuf, rdx = fileSize
 
-; === H_51: write output.exe (rsi=argv[2] = r13) ===
+; === H_51: write to argv[1] (test: self-copy) ===
+; Don't change rsi, use r12 (argv[1])
 00 00 A0 4C
 00 00 A0 89
-00 00 A0 EE
+00 00 A0 E6
 ; mov r8, rdx  ; r8 = fileSize
 00 00 A0 49
 00 00 A0 89
@@ -197,6 +184,12 @@
 00 00 A0 89
 00 00 A0 C2
 00 00 51 00 00 00
+; DEBUG: read first byte of rsi
+00 00 A0 31
+00 00 A0 C0
+00 00 A0 8A
+00 00 A0 06
+00 00 FF
 
 ; === Cleanup ===
 ; add rsp, 0x1000
