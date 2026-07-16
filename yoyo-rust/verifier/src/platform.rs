@@ -351,16 +351,21 @@ impl Platform for Win32Platform {
         // 1. Path from RSI
         mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
 
-        // 2. CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)
+        // 2. CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
+        //    CreateFileA is a 7-arg Win32 API. The 5th, 6th, 7th args are stack-passed
+        //    and must be written to [rsp+0x20], [rsp+0x28], [rsp+0x30] explicitly —
+        //    shadow_frame(0x28) alone leaves them uninitialized (Windows loader then
+        //    uses random caller-stack values for hTemplateFile → CreateFileA AV).
         movabs(buf, Reg::Rdx, 0x8000_0000u64)?;
         movabs(buf, Reg::R8, 1)?;
         movabs(buf, Reg::R9, 0)?;
-        movabs(buf, Reg::Rax, 3)?; // OPEN_EXISTING
-        buf.push(0x50)?;
-        shadow_frame(buf)?;
+        movabs(buf, Reg::Rax, 3)?; // OPEN_EXISTING  (also written to stack below)
+        sub_imm(buf, Reg::Rsp, 0x38)?; // 56 = 32 shadow + 24 (3 stack args × 8)
+        mov_qword_rsp_disp_imm32(buf, 0x20, 3)?;    // 5th arg = OPEN_EXISTING
+        mov_qword_rsp_disp_imm32(buf, 0x28, 0x80)?; // 6th arg = FILE_ATTRIBUTE_NORMAL
+        mov_qword_rsp_disp_imm32(buf, 0x30, 0)?;    // 7th arg = NULL hTemplateFile
         call_iat_thunk(buf, Win32Api::CreateFileA)?;
-        shadow_ret(buf)?;
-        add_imm(buf, Reg::Rsp, 8)?;
+        add_imm(buf, Reg::Rsp, 0x38)?;
         mov_r_r(buf, Reg::R12, Reg::Rax)?;
 
         // 3. GetFileSize(hFile=r12, NULL)
@@ -381,16 +386,16 @@ impl Platform for Win32Platform {
         shadow_ret(buf)?;
         mov_r_r(buf, Reg::R14, Reg::Rax)?;
 
-        // 5. ReadFile(hFile=r12, contentBuf=r14, fileSize=r13, 0, NULL)
+        // 5. ReadFile(hFile=r12, contentBuf=r14, fileSize=r13, NULL, NULL)
+        //    5-arg call, 5th arg (lpOverlapped) is stack at [rsp+0x20]
         mov_r_r(buf, Reg::Rcx, Reg::R12)?;
         mov_r_r(buf, Reg::Rdx, Reg::R14)?;
         mov_r_r(buf, Reg::R8, Reg::R13)?;
-        movabs(buf, Reg::R9, 0)?;
-        movabs(buf, Reg::Rax, 0)?;
-        buf.push(0x50)?;
-        shadow_frame(buf)?;
+        movabs(buf, Reg::R9, 0)?;       // NULL lpNumberOfBytesRead
+        sub_imm(buf, Reg::Rsp, 0x28)?;
+        mov_qword_rsp_disp_imm32(buf, 0x20, 0)?; // 5th arg = NULL lpOverlapped
         call_iat_thunk(buf, Win32Api::ReadFile)?;
-        shadow_ret(buf)?;
+        add_imm(buf, Reg::Rsp, 0x28)?;
         add_imm(buf, Reg::Rsp, 8)?;
 
         // 6. CloseHandle(hFile=r12)
@@ -426,7 +431,7 @@ impl Platform for Win32Platform {
 
         // Push callee-saved (r12=hFile, r13=contentBuf, r14=fileSize)
         buf.push(0x41)?; buf.push(0x54)?; // push r12
-        buf.push(0x41)?; buf.push(0x5D)?; // push r13
+        buf.push(0x41)?; buf.push(0x55)?; // push r13
         buf.push(0x41)?; buf.push(0x56)?; // push r14
 
         // Save caller's contentBuf (rdx) and fileSize (r8) before CreateFileA clobbers them
@@ -437,29 +442,30 @@ impl Platform for Win32Platform {
         mov_r_r(buf, Reg::Rcx, Reg::Rsi)?;
 
         // 2. CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)
+        //    Same 7-arg problem as H_50: write stack args explicitly.
         movabs(buf, Reg::Rdx, 0x4000_0000u64)?;
         movabs(buf, Reg::R8, 0)?;  // dwShareMode = 0
         movabs(buf, Reg::R9, 0)?;
         movabs(buf, Reg::Rax, 2)?; // CREATE_ALWAYS
-        buf.push(0x50)?;
-        shadow_frame(buf)?;
+        sub_imm(buf, Reg::Rsp, 0x38)?; // 56 = 32 shadow + 24 (3 stack args × 8)
+        mov_qword_rsp_disp_imm32(buf, 0x20, 2)?;    // 5th arg = CREATE_ALWAYS
+        mov_qword_rsp_disp_imm32(buf, 0x28, 0)?;    // 6th arg = 0 (no special flags)
+        mov_qword_rsp_disp_imm32(buf, 0x30, 0)?;    // 7th arg = NULL hTemplateFile
         call_iat_thunk(buf, Win32Api::CreateFileA)?;
-        shadow_ret(buf)?;
-        add_imm(buf, Reg::Rsp, 8)?;
+        add_imm(buf, Reg::Rsp, 0x38)?;
         // hFile in r12
         mov_r_r(buf, Reg::R12, Reg::Rax)?;
 
-        // 3. WriteFile(hFile=r12, contentBuf=r13, fileSize=r14)
+        // 3. WriteFile(hFile=r12, contentBuf=r13, fileSize=r14, NULL, NULL)
+        //    5-arg call, 5th arg (lpOverlapped) is stack at [rsp+0x20]
         mov_r_r(buf, Reg::Rcx, Reg::R12)?;
         mov_r_r(buf, Reg::Rdx, Reg::R13)?;  // contentBuf from saved r13
         mov_r_r(buf, Reg::R8, Reg::R14)?;   // fileSize from saved r14
-        movabs(buf, Reg::R9, 0)?;
-        movabs(buf, Reg::Rax, 0)?;
-        buf.push(0x50)?;
-        shadow_frame(buf)?;
+        movabs(buf, Reg::R9, 0)?;            // NULL lpNumberOfBytesRead
+        sub_imm(buf, Reg::Rsp, 0x28)?;
+        mov_qword_rsp_disp_imm32(buf, 0x20, 0)?; // 5th arg = NULL lpOverlapped
         call_iat_thunk(buf, Win32Api::WriteFile)?;
-        shadow_ret(buf)?;
-        add_imm(buf, Reg::Rsp, 8)?;
+        add_imm(buf, Reg::Rsp, 0x28)?;
 
         // 4. CloseHandle(hFile=r12)
         mov_r_r(buf, Reg::Rcx, Reg::R12)?;

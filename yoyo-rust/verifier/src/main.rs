@@ -43,6 +43,7 @@ fn main() {
     match subcommand.as_str() {
         "decode" => run_decode(&args[2..]),
         "diff" => run_diff(&args[2..]),
+        "disasm" => run_disasm(&args[2..]),
         "scan-relocs" => run_scan_relocs(&args[2..]),
         "link" => run_link(&args[2..]),
         "resolve-vars" => run_resolve_vars(&args[2..]),
@@ -61,6 +62,7 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  yoyo decode <file.ty>");
     eprintln!("  yoyo diff <a.exe> <b.exe> [--source=<file.ty>]");
+    eprintln!("  yoyo disasm <file.exe|elf> [--from=<hex>]  Disassemble .text section");
     eprintln!("  yoyo scan-relocs <file.exe|elf> [--from=<hex>] [--list]");
     eprintln!("  yoyo resolve-vars <file.ty>     Show variable definitions");
     eprintln!("  yoyo link <file.ty> <out> [--platform win32|linux|stub]");
@@ -502,6 +504,71 @@ fn run_scan_relocs(args: &[String]) {
                 target,
             );
         }
+    }
+}
+
+/// Disassemble the .text section of a yoyo-emitted PE/ELF binary.
+/// Uses the same disasm::disasm used by run_decode, but reads .text
+/// bytes from the compiled binary instead of from emit output.
+///
+/// `--from=<hex>` lets you start mid-.text (e.g. `--from=0x200` to skip
+/// the startup blob and see user code).
+fn run_disasm(args: &[String]) {
+    if args.is_empty() {
+        eprintln!("disasm: need <file.exe|elf> [--from=<hex>]");
+        process::exit(2);
+    }
+    let path = &args[0];
+    let mut from: Option<usize> = None;
+    for arg in &args[1..] {
+        if let Some(v) = arg.strip_prefix("--from=") {
+            let v = v.trim_start_matches("0x");
+            from = usize::from_str_radix(v, 16).ok();
+        }
+    }
+
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", path, e);
+            process::exit(1);
+        }
+    };
+
+    let section = match read_text_section_auto(&bytes) {
+        Some(s) => s,
+        None => {
+            eprintln!("error: {}: .text section not found (not a yoyo PE/ELF?)", path);
+            process::exit(1);
+        }
+    };
+    let text = match extract_text_slice(&bytes, &section) {
+        Some(t) => t,
+        None => {
+            eprintln!("error: {}: .text section out of file bounds", path);
+            process::exit(1);
+        }
+    };
+
+    let start = from.unwrap_or(0).min(text.len());
+    let slice = &text[start..];
+    let lines = disasm::disasm(slice);
+
+    eprintln!("# disasm: {}", path);
+    eprintln!(
+        "# .text file offset 0x{:X}, size {} bytes",
+        section.file_offset,
+        section.size
+    );
+    eprintln!("# from .text+0x{:X} ({} bytes) — {} instructions",
+              start, slice.len(), lines.len());
+    println!();
+    println!("{:<8}  {}", ".text+0x", "mnemonic");
+    for l in &lines {
+        // l.byte_offset is offset within `slice` (which is text[start..])
+        // so the absolute .text offset is start + l.byte_offset
+        let abs = start + l.byte_offset as usize;
+        println!("{:<8}  {}", format!("{:X}", abs), l.mnemonic);
     }
 }
 

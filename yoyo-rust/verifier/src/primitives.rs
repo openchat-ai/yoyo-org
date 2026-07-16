@@ -93,6 +93,20 @@ pub fn load_state<const N: usize>(buf: &mut FixedBuf<N>, slot: u8, dst: Reg) -> 
     }
 }
 
+/// Emit `mov qword [rsp + disp8], imm32` — write a 32-bit sign-extended
+/// immediate into the Win64 shadow/stack-args area. Used to populate the
+/// 5th+ stack-passed arguments to kernel32 calls (CreateFileA needs 3).
+///
+/// Encoding: 48 C7 44 24 dd ii ii ii ii  (10 bytes)
+pub fn mov_qword_rsp_disp_imm32<const N: usize>(buf: &mut FixedBuf<N>, disp: u8, imm: i32) -> IsaResult<()> {
+    buf.push(0x48)?;              // REX.W
+    buf.push(0xC7)?;              // MOV r/m64, imm32
+    buf.push(0x44)?;              // ModRM: mod=01 reg=0 r/m=100 (SIB)
+    buf.push(0x24)?;              // SIB: rsp
+    buf.push(disp)?;              // disp8
+    buf.extend(&imm.to_le_bytes()) // imm32
+}
+
 pub fn store_state<const N: usize>(buf: &mut FixedBuf<N>, slot: u8, src: Reg) -> IsaResult<()> {
     let offset = (slot as u16) * 8;
     buf.push(rex(true, src.rex_r(), false, STATE_BASE.rex_b()))?;

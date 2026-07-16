@@ -185,7 +185,7 @@
 ; mov r8, rdx  ; r8 = fileSize
 00 00 A0 49
 00 00 A0 89
-00 00 A0 C2
+00 00 A0 D0
 ; mov rdx, rax  ; rdx = contentBuf
 00 00 A0 48
 00 00 A0 89
