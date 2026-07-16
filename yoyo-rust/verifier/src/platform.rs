@@ -396,7 +396,6 @@ impl Platform for Win32Platform {
         mov_qword_rsp_disp_imm32(buf, 0x20, 0)?; // 5th arg = NULL lpOverlapped
         call_iat_thunk(buf, Win32Api::ReadFile)?;
         add_imm(buf, Reg::Rsp, 0x28)?;
-        add_imm(buf, Reg::Rsp, 8)?;
 
         // 6. CloseHandle(hFile=r12)
         mov_r_r(buf, Reg::Rcx, Reg::R12)?;
@@ -482,32 +481,65 @@ impl Platform for Win32Platform {
 
     fn startup_blob(&self) -> &[u8] {
         // Win32 v0.4 startup (48 bytes — stack-argv pivot, BSS-backed state):
-        //   [0..1]     mov r15 prefix 0x49 0xB8
-        //   [2..9]     IMM64 placeholder (BSS_RVA — writable page from FSize=0x1000 file zeros)
-        //   [10..13]   sub rsp, 0x28 (4B)
+        //   [0..1]     mov r15 prefix 0x49 0xBF
+        //   [2..9]     IMM64 placeholder (BSS_RVA — v0.4 H_00 immediately overwrites via lea r15)
+        //   [10..13]   sub rsp, 0x28 (4B) — shadow space for GetCommandLineA
         //   [14..19]   call [rip+rel] idx=15 GetCommandLineA (6B) → rax = PSTR cmdline
-        //   [20..24]   mov [rsp+0x20], rax (5B)
-        //   [25..28]   add rsp, 0x28 (4B)
-        //   [29..33]   lea rdi, [rsp-0x08] (5B) — rdi = &save_slot
-        //   [34..37]   sub rsp, 0x08 (4B) — align for H_00 call
-        //   [38..42]   call rel32 (H_00); E8 at 38, rel32 at 39
-        //   [43..46]   add rsp, 0x08 (4B)
-        //   [47]       ret (1B)
+        //   [20..24]   mov [rsp+0x20], rax (5B) — save cmdline at rsp+0x20 in shadow frame
+        //   [25..28]   add rsp, 0x28 (4B) — pop shadow frame (rsp restored)
+        //   [29..33]   lea rdi, [rsp+0x18] (5B) — rdi = &save_slot (which is at rsp+0x20 right
+        //              before adding 0x28, i.e. now rsp+0x18 because rsp already restored)
+        //              Actually simpler: the save_slot location was rsp+0x20 when rsp was
+        //              shadow-frame size below. After add rsp 0x28, save_slot is at
+        //              rsp+0x20 - 0x28 = rsp - 0x08. So `lea rdi, [rsp - 8]`.
+        //   [34..37]   sub rsp, 0x08 (4B)
+        //   [38..42]   call rel32 (H_00); E8 at 38, rel32 at 39 — push return addr
+        //   [43..46]   NO add rsp, 0x08 — REMOVED: the sub rsp 0x08 was for Win64 ABI
+        //              16-byte stack alignment before call (call requires aligned rsp).
+        //              After the call, rsp was X-0x18 (call push ret) and H_00 ret
+        //              left rsp at X-0x18+8 = X-0x10. Restoring original sub means
+        //              X - 0x10 + 0x08 = X - 0x08. But we want rsp = X (entry).
+        //              **So don't sub rsp, 0x08 in the first place**, OR balance it.
+        //              Cleaner fix: don't sub at all.
+        //   [43..46]   ... actually replace with same `add rsp 0x08` to undo
+        //   [47]       ret
         //
-        // H_00 receives rdi = &save_slot. yoy0.ty v0.4 reads cmdline from [rdi].
-        // State is on BSS (r15-based, since FSize=0x1000 file zeros ensures writable page).
+        // KNOWN BUG in v3 startup: the `sub rsp, 0x08 / add rsp, 0x08` pair leaves rsp
+        // at X-0x08 instead of X when control reaches `ret`. The cmdline ptr saved in
+        // [X-0x10] via `mov [rsp+0x20], rax` then gets popped as RIP by the final `ret`,
+        // causing AV. Fix: drop the sub rsp, 0x08 + add rsp, 0x08 pair entirely.
+        //
+        // WIN64 ABI alignment: when calling H_00, rsp must be 16-byte aligned.
+        // The push rsp - 8 from `sub rsp, 0x28` ensures [rsp+0x20] sits on a 16-aligned
+        // boundary. We skip sub rsp, 0x08; the `call H_00` itself pushes 8 bytes
+        // (return addr), making rsp 16-aligned within H_00 if it was 16-aligned before.
+        // The PE loader transfers control to the entrypoint with rsp 16-byte aligned
+        // minus 8, so after `sub rsp, 0x28` (40-byte frame) rsp stays 16-byte aligned
+        // because 40 is a multiple of 16. After `add rsp, 0x28` and before any further
+        // sub, rsp is again 16-aligned. Adding 8-byte ret-push inside H_00 keeps alignment.
+
+        // Layout (48 bytes, padded with NOPs):
+        //   [0..9]   mov r15, BSS_RVA (imm64 patched by pe_link at [2..10])
+        //   [10..15] call [rip+rel] GetCommandLineA → rax = PSTR cmdline
+        //   [16]     push rax        (save cmdline ptr at [rsp], survives call H_00)
+        //   [17..19] mov rdi, rsp    (rdi = &save_slot; H_00 reads [rdi] = cmdline PSTR)
+        //   [20..24] call rel32 (H_00) — E8 at 20, rel32 at 21..24 (patched by pe_link E8 scan)
+        //   [25]     pop rcx         (discard saved cmdline, restore rsp to entry value)
+        //   [26]     ret             (pop original return addr)
         &[
-            0x49, 0xB8, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA
+            0x49, 0xBF, 0x00, 0x00, 0x00, 0x00, // mov r15, BSS_RVA (placeholder)
             0x00, 0x00, 0x00, 0x00,             //
-            0x48, 0x83, 0xEC, 0x28,             // sub rsp, 0x28
-            0xFF, 0x15, 0x0F, 0x00, 0x00, 0x00, // call GetCommandLineA
-            0x48, 0x89, 0x44, 0x24, 0x20,       // mov [rsp+0x20], rax
-            0x48, 0x83, 0xC4, 0x28,             // add rsp, 0x28
-            0x48, 0x8D, 0x7C, 0x24, 0xF8,       // lea rdi, [rsp-0x08]
-            0x48, 0x83, 0xEC, 0x08,             // sub rsp, 0x08
-            0xE8, 0x00, 0x00, 0x00, 0x00,       // call rel32 (H_00)
-            0x48, 0x83, 0xC4, 0x08,             // add rsp, 0x08
+            0xFF, 0x15, 0x0F, 0x00, 0x00, 0x00, // call [rip+rel] GetCommandLineA
+            0x50,                               // push rax  (cmdline ptr on stack)
+            0x48, 0x89, 0xE7,                   // mov rdi, rsp (rdi = &cmdline ptr)
+            0xE8, 0x00, 0x00, 0x00, 0x00,       // call rel32 (H_00) — E8 at offset 20
+            0x59,                               // pop rcx (unwind stack)
             0xC3,                               // ret
+            0x90, 0x90, 0x90, 0x90, 0x90,       // pad NOPs to 48 bytes
+            0x90, 0x90, 0x90, 0x90, 0x90,       //
+            0x90, 0x90, 0x90, 0x90, 0x90,       //
+            0x90, 0x90, 0x90, 0x90, 0x90,       //
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, //
         ]
     }
 }

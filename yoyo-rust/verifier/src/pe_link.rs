@@ -17,21 +17,10 @@ const TEXT_RVA: u32 = 0x1000;
 const BSS_RVA: u32 = 0x3000;       // .bss section RVA (zero-initialized, R/W)
 const BSS_VSIZE: u32 = 0x1000;     // 4096 bytes = 256 slots × 16 bytes headroom
 
-/// Win32 v0.4 startup layout (48 bytes — stack-argv with safe save slot — see Win32Platform::startup_blob):
-///   [0..1]     mov r15 prefix 0x49 0xB8
-///   [2..9]     IMM64 placeholder for BSS_RVA (MOV_R15_OFFSET = 2)
-///   [10..13]   sub rsp, 0x28 (4B) — 0x20 shadow + 0x08 save slot
-///   [14..19]   call [rip+rel] GetCommandLineA (6B)
-///   [20..24]   mov [rsp+0x20], rax (5B) — save cmdline at [rsp+0x20] (below caller's retaddr)
-///   [25..28]   add rsp, 0x28 (4B)
-///   [29..33]   lea rdi, [rsp-0x8] (5B) — rdi = &save_slot (the cmdline PSTR is at this address)
-///   [34..37]   sub rsp, 8 (4B) — align for H_00 call
-///   [38..42]   call rel32 (H_00); E8 at 38, rel32 at 39
-///   [43..46]   add rsp, 8 (4B)
-///   [47]       ret (1B)
-const WIN32_STARTUP_LEN: usize = 48;
+/// Win32 v0.4 startup layout — see Win32Platform::startup_blob.
+/// MOV_R15_OFFSET = 2 (imm64 placeholder right after 0x49 0xBF).
+/// The `E8` call offset is found by scanning startup blob at link time.
 const MOV_R15_OFFSET: usize = 2;
-const CALL_REL32_OFFSET: usize = 39;
 
 /// Build a PE32+ console executable.
 ///
@@ -312,21 +301,17 @@ fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
         if rel32 != 0 {
             combined[1..5].copy_from_slice(&(rel32 as i32).to_le_bytes());
         }
-    } else if startup.len() >= WIN32_STARTUP_LEN {
-        // Win32 startup: patch BOTH r15 IMM64 and call rel32
-        let r15_imm = IMAGE_BASE + BSS_RVA as u64;
-        combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
-            .copy_from_slice(&r15_imm.to_le_bytes());
-
-        // call rel32 — relative to next instruction
-        let rel32 = (startup.len() as i32) - ((CALL_REL32_OFFSET as i32) - 1 + 5);
-        if rel32 != 0 {
-            combined[CALL_REL32_OFFSET..CALL_REL32_OFFSET + 4]
-                .copy_from_slice(&(rel32 as i32).to_le_bytes());
-        }
     } else {
-        // Legacy/fallback — find E8 (call) in the startup blob
-        for i in 0..startup.len().saturating_sub(4) {
+        // Find 0x49 0xBF (mov r15, imm64) and patch the IMM64 field
+        if startup.len() >= 10 && startup[0] == 0x49 && startup[1] == 0xBF {
+            let r15_imm = IMAGE_BASE + BSS_RVA as u64;
+            combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
+                .copy_from_slice(&r15_imm.to_le_bytes());
+        }
+
+        // Scan for E8 (call) anywhere in startup and patch rel32
+        // Target = first byte after startup (= start of H_00 user code)
+        for i in 0..startup.len().saturating_sub(5) {
             if startup[i] == 0xE8 {
                 let rel32 = startup.len() as i32 - (i as i32 + 5);
                 if rel32 != 0 {

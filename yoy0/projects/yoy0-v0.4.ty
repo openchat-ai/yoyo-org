@@ -42,7 +42,7 @@
 00 00 A0 00
 
 ; lea r15, [rsp+0x800]
-00 00 A0 48
+00 00 A0 4C
 00 00 A0 8D
 00 00 A0 BC
 00 00 A0 24
@@ -181,7 +181,7 @@
 ; === H_51: write to out.exe (rsi=argv[2] = r13) ===
 00 00 A0 4C
 00 00 A0 89
-00 00 A0 B6
+00 00 A0 EE
 ; mov r8, rdx  ; r8 = fileSize
 00 00 A0 49
 00 00 A0 89
