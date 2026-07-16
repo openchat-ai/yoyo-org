@@ -1,10 +1,8 @@
+use crate::assembler::X64Assembler;
 use crate::isa::TirOp;
-use crate::platform::{emit_str_idx_addr, IatThunk, Platform, PlatformKind, Win32Api};
-use crate::primitives::*;
+use crate::platform::{emit_str_idx_addr, IatThunk, Platform, PlatformKind};
 use crate::tir::TirInst;
-use crate::types::{FixedBuf, Reg};
-
-const BUF_SIZE: usize = 1024 * 1024;
+use crate::types::Reg;
 
 /// One emitted chunk of x64 bytes, annotated with the source line it came from.
 #[derive(Debug, Clone)]
@@ -41,261 +39,240 @@ pub fn emit_with_chunks_unfixed(tir: &[TirInst]) -> (Vec<u8>, Vec<X86Chunk>) {
 }
 
 fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u8>, Vec<X86Chunk>) {
-    let mut buf = FixedBuf::<BUF_SIZE>::new();
+    let mut asm = X64Assembler::new();
     let mut chunks: Vec<X86Chunk> = Vec::new();
     let mut handler_offsets = [u32::MAX; 256];
     let mut pending: Vec<PendingFixup> = Vec::new();
+    let mut skip_body = false;
 
     for inst in tir {
-        let start = buf.len() as u32;
+        let start = asm.bytes.len() as u32;
 
         let is_handler = matches!(inst.op, TirOp::HandlerStart { .. });
         if is_handler {
+            skip_body = false;
             if let TirOp::HandlerStart { hh } = &inst.op {
                 handler_offsets[*hh as usize] = start;
+                if *hh == 0x40 && matches!(platform, PlatformKind::Win32) {
+                    platform.emit_h00_code(&mut asm).unwrap();
+                    skip_body = true;
+                    let end = asm.bytes.len() as u32;
+                    chunks.push(X86Chunk {
+                        byte_offset: start,
+                        bytes: asm.bytes[start as usize..end as usize].to_vec(),
+                        tir_source_line: inst.source_line,
+                    });
+                }
             }
             continue;
         }
 
+        if skip_body {
+            continue;
+        }
+
         match &inst.op {
-            // ── Integer / Control Flow ──
             TirOp::SetImm { slot, imm } => {
-                movabs(&mut buf, Reg::Rax, *imm).unwrap();
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                asm.mov_imm64(Reg::Rax, *imm);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::Get { dst, src } => {
-                load_state(&mut buf, *src as u8, Reg::Rax).unwrap();
-                store_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *src as u8);
+                asm.store_state(*dst as u8, Reg::Rax);
             }
             TirOp::AddImm { slot, imm } => {
-                load_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
-                add_imm(&mut buf, Reg::Rax, *imm as i32).unwrap();
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *slot as u8);
+                asm.add_imm(Reg::Rax, *imm as i32);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::SubImm { slot, imm } => {
-                load_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
-                sub_imm(&mut buf, Reg::Rax, *imm as i32).unwrap();
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *slot as u8);
+                asm.sub_imm(Reg::Rax, *imm as i32);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::Inc { slot } => {
-                load_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
-                add_imm(&mut buf, Reg::Rax, 1).unwrap();
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *slot as u8);
+                asm.add_imm(Reg::Rax, 1);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::Dec { slot } => {
-                load_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
-                sub_imm(&mut buf, Reg::Rax, 1).unwrap();
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *slot as u8);
+                asm.sub_imm(Reg::Rax, 1);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::AddV { dst, src } => {
-                load_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
-                load_state(&mut buf, *src as u8, Reg::Rdx).unwrap();
-                add_reg(&mut buf, Reg::Rax, Reg::Rdx).unwrap();
-                store_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *dst as u8);
+                asm.load_state(Reg::Rdx, *src as u8);
+                asm.add_rr(Reg::Rax, Reg::Rdx);
+                asm.store_state(*dst as u8, Reg::Rax);
             }
             TirOp::SubV { dst, src } => {
-                load_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
-                load_state(&mut buf, *src as u8, Reg::Rdx).unwrap();
-                sub_reg(&mut buf, Reg::Rax, Reg::Rdx).unwrap();
-                store_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *dst as u8);
+                asm.load_state(Reg::Rdx, *src as u8);
+                asm.sub_rr(Reg::Rax, Reg::Rdx);
+                asm.store_state(*dst as u8, Reg::Rax);
             }
             TirOp::Imul { dst, src } => {
-                load_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
-                load_state(&mut buf, *src as u8, Reg::Rdx).unwrap();
-                mul_reg(&mut buf, Reg::Rax, Reg::Rdx).unwrap();
-                store_state(&mut buf, *dst as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rax, *dst as u8);
+                asm.load_state(Reg::Rdx, *src as u8);
+                asm.imul_rr(Reg::Rax, Reg::Rdx);
+                asm.store_state(*dst as u8, Reg::Rax);
             }
             TirOp::Cmp { a, b } => {
-                load_state(&mut buf, *a as u8, Reg::Rax).unwrap();
-                load_state(&mut buf, *b as u8, Reg::Rdx).unwrap();
-                cmp_reg(&mut buf, Reg::Rax, Reg::Rdx).unwrap();
+                asm.load_state(Reg::Rax, *a as u8);
+                asm.load_state(Reg::Rdx, *b as u8);
+                asm.cmp_rr(Reg::Rax, Reg::Rdx);
             }
 
             // ── Branches (placeholder rel32, fixed in second pass) ──
             TirOp::CallHh { hh } => {
-                call_rel32(&mut buf, 0).unwrap();
+                asm.call_rel32_placeholder();
                 pending.push(PendingFixup { inst_start: start, inst_len: 5, hh: *hh });
             }
             TirOp::JmpHh { hh } => {
-                jmp_rel32(&mut buf, 0).unwrap();
+                asm.jmp_rel32_placeholder();
                 pending.push(PendingFixup { inst_start: start, inst_len: 5, hh: *hh });
             }
             TirOp::JeHh { hh } => {
-                jcc_rel32(&mut buf, 0x84, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x84);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JneHh { hh } => {
-                jcc_rel32(&mut buf, 0x85, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x85);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JlHh { hh } => {
-                jcc_rel32(&mut buf, 0x8C, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x8C);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JgeHh { hh } => {
-                jcc_rel32(&mut buf, 0x8D, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x8D);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JleHh { hh } => {
-                jcc_rel32(&mut buf, 0x8E, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x8E);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JgHh { hh } => {
-                jcc_rel32(&mut buf, 0x8F, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x8F);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JbHh { hh } => {
-                jcc_rel32(&mut buf, 0x82, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x82);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JaeHh { hh } => {
-                jcc_rel32(&mut buf, 0x83, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x83);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JbeHh { hh } => {
-                jcc_rel32(&mut buf, 0x86, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x86);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
             TirOp::JaHh { hh } => {
-                jcc_rel32(&mut buf, 0x87, 0).unwrap();
+                asm.jcc_rel32_placeholder(0x87);
                 pending.push(PendingFixup { inst_start: start, inst_len: 6, hh: *hh });
             }
 
             // ── Memory ──
             TirOp::Ldb { dd, ss, oo } => {
-                load_state(&mut buf, *ss as u8, Reg::Rdx).unwrap();
-                // movzx eax, byte [rdx + oo]
-                let disp8 = *oo >= -128 && *oo <= 127;
-                buf.push(0x0F).unwrap();
-                buf.push(0xB6).unwrap();
-                if disp8 {
-                    buf.push(0x42).unwrap(); // ModRM: mod=01 reg=000 rm=010 (rdx+disp8)
-                    buf.push(*oo as u8 as i8 as u8).unwrap();
-                } else {
-                    buf.push(0x82).unwrap(); // ModRM: mod=10 reg=000 rm=010 (rdx+disp32)
-                    buf.extend(&(*oo as i32).to_le_bytes()).unwrap();
-                }
-                store_state(&mut buf, *dd as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rdx, *ss as u8);
+                asm.movzx_eax_byte_mem(Reg::Rdx, *oo as i32);
+                asm.store_state(*dd as u8, Reg::Rax);
             }
             TirOp::MemcpyData { dd, off, sz } => {
-                load_state(&mut buf, *dd as u8, Reg::Rdi).unwrap();
-                lea_rsi_rip(&mut buf, *off as i32).unwrap();
-                movabs(&mut buf, Reg::Rcx, *sz).unwrap();
-                rep_movsb(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *dd as u8);
+                asm.bytes.extend_from_slice(&[0x48, 0x8D, 0x35]);
+                asm.bytes.extend(&(*off as i32).to_le_bytes());
+                asm.mov_imm64(Reg::Rcx, *sz);
+                asm.rep_movsb();
             }
             TirOp::MemcpyState { dd, ss, sz } => {
-                load_state(&mut buf, *dd as u8, Reg::Rdi).unwrap();
-                load_state(&mut buf, *ss as u8, Reg::Rsi).unwrap();
-                movabs(&mut buf, Reg::Rcx, *sz).unwrap();
-                rep_movsb(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *dd as u8);
+                asm.load_state(Reg::Rsi, *ss as u8);
+                asm.mov_imm64(Reg::Rcx, *sz);
+                asm.rep_movsb();
             }
 
             // ── Raw Data ──
             TirOp::RawByte { byte } => {
-                buf.push(*byte as u8).unwrap();
+                asm.bytes.push(*byte as u8);
             }
             TirOp::RawBytes { bytes } => {
-                buf.extend(&bytes.to_le_bytes()).unwrap();
+                asm.bytes.extend(&bytes.to_le_bytes());
             }
 
             // ── Syscall / Complex (delegated to platform) ──
             TirOp::Alloc { slot, sz } => {
-                platform.emit_alloc(&mut buf, *slot as u16, *sz).unwrap();
+                platform.emit_alloc(&mut asm, *slot as u16, *sz).unwrap();
             }
             TirOp::LoadFile { slot, str_slot } => {
-                // v0.4: str_slot = runtime state slot holding PSTR path
-                platform.emit_loadfile(&mut buf, *slot as u16, *str_slot as u16).unwrap();
+                platform.emit_loadfile(&mut asm, *slot as u16, *str_slot as u16).unwrap();
             }
             TirOp::WriteFile { id, str_slot, sz } => {
-                platform.emit_writefile(&mut buf, *id as u16, *str_slot as u16, *sz as u16).unwrap();
+                platform.emit_writefile(&mut asm, *id as u16, *str_slot as u16, *sz as u16).unwrap();
             }
 
-            // ── libyoyo_* calls (Phase 4c) ──
-            // Each emits: load args into rdi/rsi/rdx, then call [rip+rel32]
-            // where rel32 points to an IAT slot for the libyoyo_* function.
+            // ── libyoyo_* calls ──
             TirOp::LibyoyoAlloc { slot, sz } => {
-                // libyoyo_alloc(sz) -> rax
-                // rdi = sz
-                movabs(&mut buf, Reg::Rdi, *sz).unwrap();
-                // call [libyoyo_alloc]
-                IatThunk::LibyoyoAlloc.emit_call(&mut buf).unwrap();
-                // store rax to state[slot]
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                asm.mov_imm64(Reg::Rdi, *sz);
+                IatThunk::LibyoyoAlloc.emit_call(&mut asm);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::LibyoyoFree { slot } => {
-                // libyoyo_free(state[slot])  → rdi = state[slot]
-                load_state(&mut buf, *slot as u8, Reg::Rdi).unwrap();
-                IatThunk::LibyoyoFree.emit_call(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *slot as u8);
+                IatThunk::LibyoyoFree.emit_call(&mut asm);
             }
             TirOp::LibyoyoOpen { slot, str_idx } => {
-                // libyoyo_open(path_str_idx) -> rax = fd
-                // rdi = pointer to NUL-terminated path string at str_idx
-                emit_str_idx_addr(&mut buf, *str_idx).unwrap();
-                IatThunk::LibyoyoOpen.emit_call(&mut buf).unwrap();
-                // store rax to state[slot]
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                let _ = str_idx;
+                emit_str_idx_addr(&mut asm);
+                IatThunk::LibyoyoOpen.emit_call(&mut asm);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::LibyoyoRead { slot, fd, sz } => {
-                // libyoyo_read(state[fd], state[slot], sz)
-                // rdi = state[fd], rsi = state[slot], rdx = sz
-                load_state(&mut buf, *fd as u8, Reg::Rdi).unwrap();
-                load_state(&mut buf, *slot as u8, Reg::Rsi).unwrap();
-                movabs(&mut buf, Reg::Rdx, *sz as u64).unwrap();
-                IatThunk::LibyoyoRead.emit_call(&mut buf).unwrap();
-                // state[slot+1] = bytes read (return value)
-                store_state(&mut buf, (*slot + 1) as u8, Reg::Rax).unwrap();
+                asm.load_state(Reg::Rdi, *fd as u8);
+                asm.load_state(Reg::Rsi, *slot as u8);
+                asm.mov_imm64(Reg::Rdx, *sz as u64);
+                IatThunk::LibyoyoRead.emit_call(&mut asm);
+                asm.store_state((*slot + 1) as u8, Reg::Rax);
             }
             TirOp::LibyoyoWrite { fd, slot, sz } => {
-                // libyoyo_write(state[fd], state[slot], sz)
-                load_state(&mut buf, *fd as u8, Reg::Rdi).unwrap();
-                load_state(&mut buf, *slot as u8, Reg::Rsi).unwrap();
-                movabs(&mut buf, Reg::Rdx, *sz as u64).unwrap();
-                IatThunk::LibyoyoWrite.emit_call(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *fd as u8);
+                asm.load_state(Reg::Rsi, *slot as u8);
+                asm.mov_imm64(Reg::Rdx, *sz as u64);
+                IatThunk::LibyoyoWrite.emit_call(&mut asm);
             }
             TirOp::LibyoyoClose { fd } => {
-                // libyoyo_close(state[fd])
-                load_state(&mut buf, *fd as u8, Reg::Rdi).unwrap();
-                IatThunk::LibyoyoClose.emit_call(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *fd as u8);
+                IatThunk::LibyoyoClose.emit_call(&mut asm);
             }
             TirOp::LibyoyoExit { slot } => {
-                // libyoyo_exit(state[slot])  - never returns
-                load_state(&mut buf, *slot as u8, Reg::Rdi).unwrap();
-                IatThunk::LibyoyoExit.emit_call(&mut buf).unwrap();
-                // unreachable; emit ret for safety
-                ret(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *slot as u8);
+                IatThunk::LibyoyoExit.emit_call(&mut asm);
+                asm.ret();
             }
             TirOp::LibyoyoPrint { slot } => {
-                // libyoyo_print(state[slot])  - string at state[slot]
-                load_state(&mut buf, *slot as u8, Reg::Rdi).unwrap();
-                IatThunk::LibyoyoPrint.emit_call(&mut buf).unwrap();
+                asm.load_state(Reg::Rdi, *slot as u8);
+                IatThunk::LibyoyoPrint.emit_call(&mut asm);
             }
             TirOp::LibyoyoTime { slot } => {
-                // libyoyo_time() -> rax
-                IatThunk::LibyoyoTime.emit_call(&mut buf).unwrap();
-                store_state(&mut buf, *slot as u8, Reg::Rax).unwrap();
+                IatThunk::LibyoyoTime.emit_call(&mut asm);
+                asm.store_state(*slot as u8, Reg::Rax);
             }
 
-            // ── Data Defs (Sub-exp B, 2026-07-15) ──
-            // STR/RAW DEF opcodes carry their bytes via TirInst.data (out-of-band
-            // channel — the ISApproc-generated emit pattern can't see Vec<u8>).
-            // Emit 0 x64 bytes for these — data is available via inst.data but
-            // not yet wired into the .data section (sub-C territory if needed).
-            TirOp::StringDef { .. } => { /* no x64 emit */ }
-            TirOp::RawDef { .. } => { /* no x64 emit */ }
-
-            // ── HandlerStart (already handled above) ──
+            TirOp::StringDef { .. } => {}
+            TirOp::RawDef { .. } => {}
             TirOp::HandlerStart { .. } => unreachable!(),
 
-            // ── Ret ──
             TirOp::Ret => {
-                ret(&mut buf).unwrap();
+                asm.ret();
             }
         }
 
-        let end = buf.len() as u32;
+        let end = asm.bytes.len() as u32;
         chunks.push(X86Chunk {
             byte_offset: start,
-            bytes: buf.as_slice()[start as usize..end as usize].to_vec(),
+            bytes: asm.bytes[start as usize..end as usize].to_vec(),
             tir_source_line: inst.source_line,
         });
     }
@@ -306,9 +283,11 @@ fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u
             let target = handler_offsets[p.hh as usize];
             let rel32 = target as i32 - (p.inst_start as i32 + p.inst_len as i32);
             let rel32_off = p.inst_start as usize + if p.inst_len == 5 { 1 } else { 2 };
-            buf.write_i32_at(rel32_off, rel32).unwrap();
+            asm.write_at(rel32_off, &rel32.to_le_bytes());
         }
     }
 
-    (buf.as_slice().to_vec(), chunks)
+    (asm.bytes, chunks)
 }
+
+

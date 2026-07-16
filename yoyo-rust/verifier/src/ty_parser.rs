@@ -42,15 +42,12 @@ fn parse_inner(src: &str, vars: Option<&crate::variable::VarTable>) -> Vec<Sourc
         }
         // 24-bit opcode (v3 Part 4.1): 3 bytes hi/mid/low. hi=mid=0 required.
         // Fall back to 1-byte opcode (legacy) for backward compatibility.
-        let (op, args_offset) = if tokens.len() >= 3 {
-            let b0 = match parse_hex_byte(tokens[0]) {
-                Some(b) => b,
-                None => panic!("line {}: invalid opcode byte {:?} (expected 2-hex-digit)", line_no, tokens[0]),
-            };
-            let b1 = match parse_hex_byte(tokens[1]) {
-                Some(b) => b,
-                None => panic!("line {}: invalid mid-byte {:?}", line_no, tokens[1]),
-            };
+        let (op, args_offset) = if tokens.len() >= 3
+            && parse_hex_byte(tokens[0]) == Some(0)
+            && parse_hex_byte(tokens[1]) == Some(0)
+        {
+            let b0 = parse_hex_byte(tokens[0]).unwrap();
+            let b1 = parse_hex_byte(tokens[1]).unwrap();
             let b2 = match parse_hex_byte(tokens[2]) {
                 Some(b) => b,
                 None => panic!("line {}: invalid low-byte {:?}", line_no, tokens[2]),
@@ -60,7 +57,7 @@ fn parse_inner(src: &str, vars: Option<&crate::variable::VarTable>) -> Vec<Sourc
             }
             (b2, 3)  // low byte is the actual opcode
         } else {
-            // 1-byte legacy opcode
+            // 1-byte legacy opcode (or 24-bit prefix not present)
             let b = match parse_hex_byte(tokens[0]) {
                 Some(b) => b,
                 None => panic!("line {}: invalid opcode token {:?} (expected 2-hex-digit byte)", line_no, tokens[0]),
@@ -71,26 +68,36 @@ fn parse_inner(src: &str, vars: Option<&crate::variable::VarTable>) -> Vec<Sourc
         // — they contain a single `s<hex>` data token (any even length).
         // Sub-exp B (2026-07-15): parse the `s<hex>` into bytes for downstream use.
         if op == 0x12 || op == 0x13 {
+            // Find the FIRST token that starts with 's' — that's the data payload.
+            // Earlier tokens (after args_offset) are size/style args.
             let mut data: Vec<u8> = Vec::new();
-            if let Some(tok) = tokens.get(args_offset) {
-                let stripped = tok.strip_prefix('s').unwrap_or(tok);
-                if stripped.len() % 2 != 0 {
-                    panic!(
-                        "line {}: opcode 0x{:02X} data token must have even hex digits, got '{}'",
-                        line_no, op, tok
-                    );
-                }
-                let mut i = 0;
-                while i < stripped.len() {
-                    let byte = u8::from_str_radix(&stripped[i..i+2], 16).unwrap_or_else(|_| {
-                        panic!("line {}: invalid hex byte in data '{}'", line_no, tok)
-                    });
-                    data.push(byte);
-                    i += 2;
+            let mut args: Vec<u64> = Vec::new();
+            for tok in &tokens[args_offset..] {
+                if let Some(stripped) = tok.strip_prefix('s') {
+                    if stripped.len() % 2 != 0 {
+                        panic!(
+                            "line {}: opcode 0x{:02X} data token must have even hex digits, got '{}'",
+                            line_no, op, tok
+                        );
+                    }
+                    let mut i = 0;
+                    while i < stripped.len() {
+                        let byte = u8::from_str_radix(&stripped[i..i+2], 16).unwrap_or_else(|_| {
+                            panic!("line {}: invalid hex byte in data '{}'", line_no, tok)
+                        });
+                        data.push(byte);
+                        i += 2;
+                    }
+                    break;
+                } else {
+                    let val = parse_hex_u64(tok).unwrap_or_else(|| panic!(
+                        "line {}: invalid arg token {:?}", line_no, tok
+                    ));
+                    args.push(val);
                 }
             }
             out.push(SourceLine {
-                line_no, op, args: Vec::new(), data
+                line_no, op, args, data
             });
             continue;
         }

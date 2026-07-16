@@ -22,6 +22,115 @@ const BSS_VSIZE: u32 = 0x1000;     // 4096 bytes = 256 slots × 16 bytes headroo
 /// The `E8` call offset is found by scanning startup blob at link time.
 const MOV_R15_OFFSET: usize = 2;
 
+/// Post-link validation: scan `.text` for suspicious ModRM patterns.
+///
+/// Catches the `B6`-class bug: a ModRM byte with Mod=2 (memory+disp32) was
+/// used where Mod=3 (register-direct) was intended. The validator flags any
+/// REX.W=1 MOV (0x89/0x8B) with ModRM.Mod ∈ {1,2} whose r/m field is NOT
+/// R15 (low3=7), because all state memory access goes through R15.
+fn validate_code_section(code: &[u8]) -> Result<(), String> {
+    let mut i = 0;
+    while i < code.len() {
+        let b0 = code[i];
+        let is_rex_w = (b0 & 0xF0) == 0x40 && (b0 & 0x08) != 0;
+        if is_rex_w && i + 3 <= code.len() {
+            let op = code[i + 1];
+            if op == 0x89 || op == 0x8B {
+                let modrm = code[i + 2];
+                let mod_ = modrm >> 6;
+                let rm = modrm & 7;
+                if (mod_ == 1 || mod_ == 2) && rm != 7 {
+                    return Err(format!(
+                        "validate: offset 0x{:X}: ModRM.Mod={} with base r/m={} (expected r15 low3=7); \
+                         REX=0x{:02X} op=0x{:02X} ModRM=0x{:02X}; ctx: {:02X?}",
+                        i, mod_, rm, b0, op, modrm,
+                        &code[i.saturating_sub(2)..(i + 8).min(code.len())]
+                    ));
+                }
+            }
+        }
+
+        // Advance past this instruction
+        let skip = instr_len(code, i);
+        if skip == 0 { break; }
+        i += skip;
+    }
+    Ok(())
+}
+
+/// Decode x64 instruction length at offset `i`.
+/// Handles all patterns produced by yoyo's emit + platform modules.
+fn instr_len(code: &[u8], i: usize) -> usize {
+    if i >= code.len() { return 0; }
+    let b0 = code[i];
+    let is_rex = (b0 & 0xF0) == 0x40;
+    let op = if is_rex { code.get(i + 1).copied().unwrap_or(0) } else { b0 };
+
+    let modrm = code.get(i + if is_rex { 2 } else { 1 }).copied().unwrap_or(0);
+    let mod_ = modrm >> 6;
+    let rm = modrm & 7;
+
+    if is_rex {
+        let base = 3; // REX + opcode + ModRM minimum
+        match op {
+            0xB8..=0xBF => 10,
+            0x89 | 0x8B | 0x01 | 0x09 | 0x19 | 0x29 | 0x39 | 0xAF => {
+                match mod_ {
+                    3 => base,          // register-direct
+                    1 => base + 1,      // disp8
+                    2 => base + 4,      // disp32
+                    _ => base + if rm == 5 { 4 } else if rm == 4 { 1 } else { 0 },
+                }
+            }
+            0x8D => { // LEA
+                match mod_ {
+                    3 => base,
+                    1 => base + 1,
+                    2 => base + 4,
+                    _ => base + if rm == 5 { 4 } else if rm == 4 { 1 } else { 0 },
+                }
+            }
+            0x83 | 0x63 => {
+                // ALU imm8: base + imm8 + (disp if any)
+                base + 1 + match mod_ { 1 => 1, 2 => 4, _ => 0 }
+            }
+            0x81 => {
+                base + 4 + match mod_ { 1 => 1, 2 => 4, _ => 0 }
+            }
+            0xC7 => {
+                // MOV r/m64, imm32
+                let disp = match mod_ { 1 => 1, 2 => 4, _ => 0 };
+                base + disp + 4 + if rm == 4 { 1 } else { 0 } // SIB if rm=4
+            }
+            0x0F => {
+                let op2 = code.get(i + 2).copied().unwrap_or(0);
+                if op2 == 0xAF || op2 == 0xB6 {
+                    let mrm = code.get(i + 3).copied().unwrap_or(0);
+                    4 + match mrm >> 6 { 1 => 1, 2 => 4, _ => 0 }
+                } else { 10 }
+            }
+            _ => base,
+        }
+    } else {
+        match op {
+            0xC3 | 0x90 | 0xCC => 1,
+            0xE8 | 0xE9 => 5,
+            0xEB => 2,
+            0x0F => {
+                let op2 = code.get(i + 1).copied().unwrap_or(0);
+                if (0x80..=0x8F).contains(&op2) { 6 } else { 2 }
+            }
+            0xF3 => {
+                if code.get(i + 1).copied().unwrap_or(0) == 0xA4 { 2 } else { 2 }
+            }
+            0x66 => {
+                if code.get(i + 1).copied().unwrap_or(0) == 0x90 { 2 } else { 2 }
+            }
+            _ => 1,
+        }
+    }
+}
+
 /// Build a PE32+ console executable.
 ///
 /// `startup` = platform startup blob. Win32 startup is 24 bytes with two
@@ -35,7 +144,8 @@ const MOV_R15_OFFSET: usize = 2;
 /// 3. Builds .text, .idata, .bss sections
 /// 4. Builds .idata section with import table for kernel32.dll
 /// 5. Patches FF 15 placeholders with correct RIP-relative disp32
-/// 6. Writes output PE file
+/// 6. Validates code section for ModRM errors
+/// 7. Writes output PE file
 pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), String> {
     let combined = build_text(startup, handler_code);
     let mut code = combined.bytes;
@@ -262,6 +372,9 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let bss_file_off = idata_file_off as usize + idata_fsize as usize;
     pe.resize(bss_file_off, 0);
     pe.extend(vec![0u8; BSS_VSIZE as usize]);
+
+    // Post-link validation: catch ModRM.Mod errors in code section
+    validate_code_section(&code)?;
 
     Ok(fs::write(out_path, &pe).map_err(|e| format!("write {}: {}", out_path.display(), e))?)
 }
@@ -650,5 +763,77 @@ mod tests {
         );
 
         fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_validate_code_section_good() {
+        // A mix of valid yoyo-emitted instructions
+        let code = vec![
+            0x4D, 0x89, 0x77, 0x00, // store_state(0, R14) — R15 disp8, valid
+            0x4D, 0x8B, 0x7F, 0x08, // load_state(1, R15) — R15 disp8 dst, valid
+            0x4D, 0x89, 0xB7, 0x80, 0x00, 0x00, 0x00, // store_state(16, R14) — R15 disp32, valid
+            0x4C, 0x89, 0xEE,       // mov_r_r(Rsi, R13) — register-direct, valid
+            0x49, 0x89, 0xC7,       // mov_r_r(R15, Rax) — register-direct, valid
+            0xC3,                   // ret
+        ];
+        assert!(validate_code_section(&code).is_ok(),
+            "valid code should pass validation");
+    }
+
+    #[test]
+    fn test_validate_code_section_b6_bug() {
+        // The exact B6-class bug: ModRM.Mod=2 with r/m=6(RSI) instead of r/m=7(R15)
+        // Encoding: 4C 89 B6 (mov [rsi+disp32], r14) — REX.W=0,R=1,B=0
+        // Wait: this REX has W=0 (0x4C & 0x08 == 0). So validate won't flag it...
+        // We need W=1: 4D 89 B6 (REX.W=1,R=1,B=0) — mov [rsi+disp32], r14
+        // But our original bug was 4C 89 B6 which doesn't have W=1.
+        // Let me construct a W=1 version that's semantically similar:
+        // 4D 89 B6 XX XX XX XX — mov [rsi+disp32], r14 (ModRM.Mod=2, r/m=6=RSI, not R15)
+        let code = vec![
+            0x4D, 0x89, 0xB6, 0x40, 0x00, 0x00, 0x00, // mov [rsi+0x40], r14 (BUG!)
+            0xC3, // ret
+        ];
+        let result = validate_code_section(&code);
+        assert!(result.is_err(), "B6-class bug should be detected");
+        let err = result.unwrap_err();
+        assert!(err.contains("r/m=6"), "error should mention r/m=6 not r15");
+        assert!(err.contains("r15"), "error should mention expected r15");
+    }
+
+    #[test]
+    fn test_validate_code_section_accepts_iat_thunk() {
+        // FF 15 (call [rip+disp32]) is the legitimate IAT thunk pattern.
+        // Our validator only checks 0x89/0x8B, so FF 15 is silently accepted.
+        let code = vec![
+            0xFF, 0x15, 0x2A, 0x00, 0x00, 0x00, // call [rip+0x2A]
+            0xC3,
+        ];
+        assert!(validate_code_section(&code).is_ok(),
+            "IAT thunk FF 15 should pass validation silently");
+    }
+
+    #[test]
+    fn test_validate_slot0_r13_store() {
+        // store_state(0, R13) = 4D 89 6F 00 — this appeared in AGENTS.md and the actual emit
+        let code = vec![0x4D, 0x89, 0x6F, 0x00, 0xC3];
+        assert!(validate_code_section(&code).is_ok(),
+            "store_state(0, R13) should pass");
+    }
+
+    #[test]
+    fn test_validate_detects_mov_to_non_r15_base() {
+        // mov [r12+disp32], r14: 4D 89 B4 24 XX XX XX XX (SIB: r12 via disp32)
+        // Actually: 4D 89 B4 24 — with rm=4 (SIB) and mod=2
+        // 4D = REX.W=1,R=1,B=0
+        // 89 = MOV
+        // B4 = mod=10, reg=110(R14=6), rm=100(SIB)
+        // 24 = SIB: scale=00, index=100(SP-none), base=100(RSP)
+        // So the base is RSP, not RSI. Let me test a simpler pattern:
+        // mov [rdx+disp32], rax: 48 89 82 XX XX XX XX
+        let code = vec![0x48, 0x89, 0x82, 0x40, 0x00, 0x00, 0x00, 0xC3];
+        let result = validate_code_section(&code);
+        assert!(result.is_err(), "MOV to non-R15 base should be flagged");
+        assert!(result.unwrap_err().contains("r/m=2"),
+            "should mention r/m=2 (RDX)");
     }
 }

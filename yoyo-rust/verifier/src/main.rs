@@ -24,7 +24,7 @@ mod diff_source;
 mod linscan;
 mod pe_link;
 mod types;
-mod primitives;
+mod assembler;
 mod isa;
 mod fixup;
 mod platform;
@@ -644,7 +644,7 @@ fn run_link(args: &[String]) {
         platform.name(),
     );
 
-    pe_link::link(startup_blob, &handler_code, out_path).unwrap_or_else(|e| {
+    pe_link::link(&startup_blob, &handler_code, out_path).unwrap_or_else(|e| {
         eprintln!("link error: {}", e);
         process::exit(1);
     });
