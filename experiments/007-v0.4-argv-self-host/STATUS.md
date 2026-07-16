@@ -19,11 +19,23 @@
 ### T7.6 (yoy0.ty v0.4 MVP, 7/15-7/16)
 - 写了 212 行 .ty:argv parser + copy cmdline to stack + H_50 + H_51 + cleanup
 - rust 链 link 成功:141 TIR ops → 562 x64 bytes (含 48B startup)
-- 7/16 修了 3 个 .ty bug:
+- 7/16 修了 4 个 .ty bug:
   1. H_50 字节 4C 89 F4 → 4C 89 E6 (F4 是 mov rsp, r14;E6 才是 mov rsi, r12)
   2. H_51 字节 4C 89 F5 → 4C 89 B6 (F5 是 mov rbp, r14;B6 才是 mov rsi, r13)
-  3. `jz .copy_done` disp 0x02 → 0x08 (原值跳过 .copy_done 死循环越界读 OS heap)
-  4. `.scan0` 加 null 检查 (argv[0] 没空格如 "yoy0-v0.4-rs.exe" 死循环越界读 OS heap)
+  3. H_51 caller line 188 字节 C2 → D0 (C2 是 mov r10, rax;D0 才是 mov r8, rdx)
+  4. `jz .copy_done` disp 0x02 → 0x08 (原值跳过 .copy_done 死循环越界读 OS heap)
+  5. `.scan0` 加 null 检查 (argv[0] 没空格如 "yoy0-v0.4-rs.exe" 死循环越界读 OS heap)
+- 7/16 修了 2 个 rust emit 错:
+  6. emit_writefile line 429 `0x5D` (pop r13) → `0x55` (push r13):注释说 push 但字节 0x5D 是 pop r13,栈不平衡
+  7. emit_loadfile/emit_writefile 的 CreateFileA 缺 stack args (7-arg Win32 调用):
+     - shadow_frame 0x28 不够 (Win32 7-arg 需要 0x38 = 32 shadow + 24 stack args)
+     - 显式 mov qword [rsp+0x20], 3 / [rsp+0x28], 0x80 / [rsp+0x30], 0
+  8. emit_loadfile/emit_writefile 的 ReadFile/WriteFile 缺 stack arg (5-arg, 5th = lpOverlapped):
+     - 显式 mov qword [rsp+0x20], 0
+- 7/16 加 disasm subcommand (告别盲猜):
+  - AGENTS.md 的 "yoy0-rust disasm 命令有 bug" 是误诊,根本不存在 disasm 命令
+  - 加新 subcommand 用 read_text_section_auto + extract_text_slice + disasm::disasm 流水线
+  - 支持 --from=N 跳过 startup
 
 ## ❌ Still broken
 
