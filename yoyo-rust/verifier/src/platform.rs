@@ -39,15 +39,15 @@ pub const IAT_THUNK_NAMES: [&str; NUM_IAT_THUNKS] = [
     "ReadFile",
     "WriteFile",
     "CloseHandle",
-    "libyoyo_alloc",
-    "libyoyo_free",
-    "libyoyo_open",
-    "libyoyo_read",
-    "libyoyo_write",
-    "libyoyo_close",
-    "libyoyo_exit",
-    "libyoyo_print",
-    "libyoyo_time",
+    "VirtualAlloc",              // libyoyo_alloc → kernel32
+    "VirtualFree",               // libyoyo_free  → kernel32
+    "CreateFileA",               // libyoyo_open  → kernel32
+    "ReadFile",                  // libyoyo_read  → kernel32
+    "WriteFile",                 // libyoyo_write → kernel32
+    "CloseHandle",               // libyoyo_close → kernel32
+    "ExitProcess",               // libyoyo_exit  → kernel32
+    "WriteFile",                 // libyoyo_print → kernel32
+    "GetSystemTimeAsFileTime",   // libyoyo_time  → kernel32
     "GetCommandLineA",
 ];
 

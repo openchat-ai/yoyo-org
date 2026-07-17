@@ -164,27 +164,19 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let idata_fsize = align_up(idata_bytes.len() as u32, FILE_ALIGN);
     let idata_vsize = align_up(idata_bytes.len() as u32, SECTION_ALIGN);
     let idata_file_off = HEADERS_SIZE + text_fsize;
-    // BSS section RVA: place after .idata to avoid overlap with .text.
-    // (v0.4 stack-state doesn't actually use BSS, but the section header
-    // is kept for PE compatibility.)
     let bss_rva = align_up(idata_rva + idata_vsize, SECTION_ALIGN);
 
     // Patch FF 15 placeholders with correct RIP-relative displacements
     for &(code_off, api) in &fixups {
-        // code_off is absolute offset in combined code
-        // RIP-relative: disp32 = target - (instruction_addr + 6)
-        // instruction_addr = TEXT_RVA + code_off
-        // target = idata_rva + iat_offset(api)
-        let iat_off = iat_entry_offset(&unique, api);
+        let idx = unique.iter().position(|a| *a == api).unwrap_or(0) as u32;
+        let iat_off = 40 + (unique.len() as u32 + 1) * 8 + idx * 8;
         let iat_rva = idata_rva + iat_off;
         let instr_rva = TEXT_RVA + code_off;
         let disp32 = iat_rva as i64 - (instr_rva as i64 + 6);
         if disp32 < i32::MIN as i64 || disp32 > i32::MAX as i64 {
             return Err(format!("IAT displacement out of range: {}", disp32));
         }
-        let off = code_off as usize + 2; // bytes 2..6 of FF 15 00000000 (rel32 at offset 2)
-        // The byte at offset+2 is BOTH the IAT index hint AND the first byte of rel32.
-        // The patch overwrites it (as disp32[0]).
+        let off = code_off as usize + 2;
         code[off..off + 4].copy_from_slice(&(disp32 as i32).to_le_bytes());
     }
 
@@ -507,11 +499,6 @@ fn unique_apis(fixups: &[(u32, Win32Api)]) -> Vec<Win32Api> {
     let mut seen = [false; NUM_WIN32_APIS];
     let mut result = Vec::new();
     for &(_, api) in fixups {
-        // Skip libyoyo_* APIs: they live in libyoyo.dll which we don't bundle.
-        // (Patched calls will fail at runtime, but kernel32.dll imports resolve.)
-        if api as u8 >= 6 && api as u8 <= 14 {
-            continue;
-        }
         let idx = api as usize;
         if !seen[idx] {
             seen[idx] = true;
@@ -521,95 +508,57 @@ fn unique_apis(fixups: &[(u32, Win32Api)]) -> Vec<Win32Api> {
     result
 }
 
-/// Offset of an IAT entry within the FirstThunk array (in .idata).
-fn iat_entry_offset(unique: &[Win32Api], api: Win32Api) -> u32 {
-    for (i, &u) in unique.iter().enumerate() {
-        if u == api {
-            return 40 + (unique.len() as u32 + 1) * 8 + (i as u32) * 8;
-        }
-    }
-    0
-}
-
-/// Build the .idata section bytes.
-/// Returns (bytes, iat_base_rva).
+/// Split API list into kernel32 (0-5, 15) and libyoyo (6-14) groups.
+/// Build the .idata section bytes — single import table for kernel32.dll.
+/// All APIs (including libyoyo_* aliases) resolve through kernel32.
 fn build_idata(unique: &[Win32Api], idata_rva: u32) -> (Vec<u8>, u32) {
-    let n = unique.len();
+    let n = unique.len() as u32;
     let mut bytes = Vec::new();
 
-    // Compute actual by_name block size (hint(2) + name + null) per API
-    let by_name_entry_sizes: Vec<u32> = unique.iter().map(|api| {
-        let name = WIN32_API_NAMES[*api as usize];
-        2 + name.len() as u32 + 1
-    }).collect();
-    let by_name_total_size: u32 = by_name_entry_sizes.iter().sum();
-
-    // RVA tracking — actual byte order below is:
-    //   [0..20]            desc 0 (20B)
-    //   [20..40]           desc 1 / terminator (20B)
-    //   [40..40+(n+1)*8]   INT (n+1 entries × 8B)
-    //   [..iat_rva+(n+1)*8] IAT (n+1 entries × 8B)
-    //   [..]+by_name_total_size  by_name entries (n entries × (2+name+1)B)
-    //   [+14]              "kernel32.dll\0" (14B)
     let desc_rva = idata_rva;
     let int_rva = desc_rva + 40;
-    let iat_rva = int_rva + (n as u32 + 1) * 8;
-    // func_names_start = RVA of first by_name entry (immediately after IAT terminator)
-    let func_names_start = iat_rva + (n as u32 + 1) * 8;
-    // dll_name_rva = RVA of "kernel32.dll" string (immediately after by_name block)
-    let dll_name_rva = func_names_start + by_name_total_size;
+    let iat_rva = int_rva + (n + 1) * 8;
+    let func_names_start = iat_rva + (n + 1) * 8;
+    let by_name_total: u32 = unique.iter().map(|api| {
+        2 + WIN32_API_NAMES[*api as usize].len() as u32 + 1
+    }).sum();
+    let dll_name_rva = func_names_start + by_name_total;
 
-    // Descriptor 0: kernel32.dll
-    bytes.extend_from_slice(&int_rva.to_le_bytes());       // OriginalFirstThunk
-    bytes.extend(&0u32.to_le_bytes());                     // TimeDateStamp
-    bytes.extend(&0u32.to_le_bytes());                     // ForwarderChain
-    bytes.extend(&dll_name_rva.to_le_bytes());             // Name → "kernel32.dll"
-    bytes.extend(&iat_rva.to_le_bytes());                  // FirstThunk → IAT
+    bytes.extend_from_slice(&int_rva.to_le_bytes());
+    bytes.extend(&0u32.to_le_bytes());
+    bytes.extend(&0u32.to_le_bytes());
+    bytes.extend(&dll_name_rva.to_le_bytes());
+    bytes.extend(&iat_rva.to_le_bytes());
+    bytes.extend(&[0u8; 20]); // terminator
 
-    // Descriptor 1: terminator
-    bytes.extend(&[0u8; 20]);
-
-    // INT: n+1 entries (PE32+ IMAGE_THUNK_DATA is 8 bytes per slot)
+    // INT
+    let mut by_name_off = 0u32;
     for api in unique {
-        let hint_name_rva = func_names_start + by_name_entry_offset(unique, *api, n);
-        bytes.extend(&(hint_name_rva as u64).to_le_bytes());
+        bytes.extend(&((func_names_start + by_name_off) as u64).to_le_bytes());
+        by_name_off += 2 + WIN32_API_NAMES[*api as usize].len() as u32 + 1;
     }
-    bytes.extend(&0u64.to_le_bytes()); // terminator
+    bytes.extend(&0u64.to_le_bytes());
 
-    // IAT: n+1 entries (same as INT)
+    // IAT
+    by_name_off = 0;
     for api in unique {
-        let hint_name_rva = func_names_start + by_name_entry_offset(unique, *api, n);
-        bytes.extend(&(hint_name_rva as u64).to_le_bytes());
+        bytes.extend(&((func_names_start + by_name_off) as u64).to_le_bytes());
+        by_name_off += 2 + WIN32_API_NAMES[*api as usize].len() as u32 + 1;
     }
-    bytes.extend(&0u64.to_le_bytes()); // terminator
+    bytes.extend(&0u64.to_le_bytes());
 
-    // IMAGE_IMPORT_BY_NAME entries: 2 bytes hint + function name + null
+    // by_name entries + dll name
     for api in unique {
-        bytes.extend(&0u16.to_le_bytes()); // Hint
-        let name = WIN32_API_NAMES[*api as usize];
-        bytes.extend(name.as_bytes());
-        bytes.push(0); // null terminator
+        bytes.extend(&0u16.to_le_bytes());
+        bytes.extend(WIN32_API_NAMES[*api as usize].as_bytes());
+        bytes.push(0);
     }
-
-    // DLL name
     bytes.extend(b"kernel32.dll");
     bytes.push(0);
 
     (bytes, iat_rva)
 }
 
-/// Offset of by_name entry relative to func_names_start.
-fn by_name_entry_offset(unique: &[Win32Api], target: Win32Api, _n: usize) -> u32 {
-    let mut off = 0u32;
-    for api in unique {
-        if *api == target {
-            return off;
-        }
-        let name = WIN32_API_NAMES[*api as usize];
-        off += 2 + name.len() as u32 + 1; // hint(2) + name + null
-    }
-    0
-}
 
 #[cfg(test)]
 mod tests {
@@ -666,20 +615,6 @@ mod tests {
         assert_eq!(unique[0], Win32Api::VirtualAlloc);
         assert_eq!(unique[1], Win32Api::CreateFileA);
         assert_eq!(unique[2], Win32Api::CloseHandle);
-    }
-
-    #[test]
-    fn iat_entry_offset_single() {
-        let unique = vec![Win32Api::VirtualAlloc];
-        // offset = 40 (descriptors) + (1+1)*8 (INT) + 0*8 (first IAT entry)
-        assert_eq!(iat_entry_offset(&unique, Win32Api::VirtualAlloc), 40 + 16);
-    }
-
-    #[test]
-    fn iat_entry_offset_second() {
-        let unique = vec![Win32Api::CreateFileA, Win32Api::VirtualAlloc];
-        assert_eq!(iat_entry_offset(&unique, Win32Api::CreateFileA), 40 + 24);
-        assert_eq!(iat_entry_offset(&unique, Win32Api::VirtualAlloc), 40 + 24 + 8);
     }
 
     #[test]
