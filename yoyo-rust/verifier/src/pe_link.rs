@@ -207,7 +207,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.extend(&0u32.to_le_bytes());      // TimeDateStamp
     pe.extend(&0u32.to_le_bytes());      // PointerToSymbolTable
     pe.extend(&0u32.to_le_bytes());      // NumberOfSymbols
-    let sizeof_opt_hdr: u16 = 112 + 2 * 8; // PE32+ + 2 data directories (import only)
+    let sizeof_opt_hdr: u16 = 240; // Standard PE32+ size (may exceed actual fields used; ensures PE loader compatibility)
     pe.extend(&sizeof_opt_hdr.to_le_bytes());
     pe.extend(&0x0022u16.to_le_bytes()); // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE (no RELOCS_STRIPPED)
 
@@ -298,10 +298,13 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(subsys_off + 2, 0);
     pe[subsys_off..subsys_off + 2].copy_from_slice(&3u16.to_le_bytes());
 
-    // DllCharacteristics (offset 0x46) — v0.4: set DYNAMIC_BASE (0x40) for Win10 loader to commit BSS pages
+    // DllCharacteristics (offset 0x46) — v0.4: REMOVED DYNAMIC_BASE (0x40) to avoid
+    // Windows loader rejecting minimal PEs that lack a .reloc section.
+    // Without DYNAMIC_BASE, the image loads at the preferred base address
+    // without needing relocation fixups.
     let dllchars_off = (opt_start + 0x46) as usize;
     pe.resize(dllchars_off + 2, 0);
-    pe[dllchars_off..dllchars_off + 2].copy_from_slice(&0x0040u16.to_le_bytes());
+    pe[dllchars_off..dllchars_off + 2].copy_from_slice(&0x0000u16.to_le_bytes());
 
     // SizeOfStackReserve (offset 0x48, u64) — Win64 default 1 MB
     let stack_rsv_off = (opt_start + 0x48) as usize;
