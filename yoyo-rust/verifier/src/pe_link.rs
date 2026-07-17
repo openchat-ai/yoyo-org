@@ -12,7 +12,7 @@ use crate::platform::{Win32Api, NUM_WIN32_APIS, WIN32_API_NAMES};
 
 const FILE_ALIGN: u32 = 0x400;
 const SECTION_ALIGN: u32 = 0x1000;
-const IMAGE_BASE: u64 = 0x140_0000_0000;
+const IMAGE_BASE: u64 = 0x0000_0140_0000_0000;  // 5.2 GB (MS default)
 const TEXT_RVA: u32 = 0x1000;
 const BSS_RVA: u32 = 0x3000;       // .bss section RVA (zero-initialized, R/W)
                                   // Note: in v0.4 (stack-state), BSS is unused; H_00 overwrites r15 with lea rsp+0x800

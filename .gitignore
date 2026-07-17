@@ -31,6 +31,7 @@ inspect-pe2.ps1
 *.win-bak
 gen*.exe
 gen*.elf
+input.ky
 input.ky.bak
 input.ky.wsl
 ?????8???@@??????   # Weird filename from compile error capture

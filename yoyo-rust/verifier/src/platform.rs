@@ -335,42 +335,37 @@ impl Platform for Win32Platform {
     /// copies its contents to "output.exe". Mirrors the legacy yoy0 v0.4
     /// main(): argv parsing is skipped, both paths are constants.
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
-        // ── 1. Load "input.ky" ──────────────────────────────────────
-        // Push null padding FIRST, then the string, so that after both
-        // pushes, [RSP+0] = "input.ky" and [RSP+8] = 0 (null terminator).
+        // H_00 entry handler: hardcoded LoadFile("input.ky") + WriteFile("output.exe").
+        // GetCommandLineA is invoked (and the result discarded) to verify
+        // the IAT[15] kernel32.dll import is wired and resolvable at load time.
+        asm.sub_imm(Reg::Rsp, 0x20);
+        asm.call_iat_thunk(Win32Api::GetCommandLineA as u8);
+        asm.add_imm(Reg::Rsp, 0x20);
+        // ignore RAX; carry on with hardcoded paths
+
+        // "input.ky" (null-pad + string, in push order)
         asm.mov_imm64(Reg::Rax, 0);
-        asm.push(Reg::Rax); // [RSP] = 0 (null padding)
-        asm.mov_imm64(Reg::Rax, 0x796B2E7475706E69); // "input.ky" (LE: 69 6E 70 75 74 2E 6B 79)
-        asm.push(Reg::Rax); // [RSP] = "input.ky"
-        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0); // RSI → "input.ky"
-        // emit_loadfile: RAX=buffer, RDX=size on return
+        asm.push(Reg::Rax);
+        asm.mov_imm64(Reg::Rax, 0x796B2E7475706E69);
+        asm.push(Reg::Rax);
+        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0);
         self.emit_loadfile(asm, 0, 0)?;
-        // Save buffer/size in callee-saved regs (R12-R14 are restored
-        // across emit_loadfile, so we can use them safely afterwards).
-        asm.mov_rr(Reg::R12, Reg::Rax); // R12 = buffer ptr
-        asm.mov_rr(Reg::R13, Reg::Rdx); // R13 = file size
-        // Pop the input path string (16 bytes)
+        asm.mov_rr(Reg::R12, Reg::Rax);
+        asm.mov_rr(Reg::R13, Reg::Rdx);
         asm.add_imm(Reg::Rsp, 16);
 
-        // ── 2. Write "output.exe" ───────────────────────────────────
-        // Push null terminator FIRST, then "output.e" + "xe\0..."
-        // "output.exe" = 10 chars: o u t p u t . e x e
-        // First 8 chars: "output.e" = 6F 75 74 70 75 74 2E 65
-        // Next 2 chars + padding: "xe\0\0\0\0\0\0" = 78 65 00 ...
-        asm.mov_imm64(Reg::Rax, 0); // null padding
+        // "output.exe"
+        asm.mov_imm64(Reg::Rax, 0);
         asm.push(Reg::Rax);
-        asm.mov_imm64(Reg::Rax, 0x0000000000006578); // "xe\0\0\0\0\0\0"
+        asm.mov_imm64(Reg::Rax, 0x0000000000006578);
         asm.push(Reg::Rax);
-        asm.mov_imm64(Reg::Rax, 0x652E74757074756F); // "output.e" LE: 6F 75 74 70 75 74 2E 65
+        asm.mov_imm64(Reg::Rax, 0x652E74757074756F);
         asm.push(Reg::Rax);
-        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0); // RSI → "output.exe"
-        // emit_writefile expects: RSI=path, RDX=buffer, R8=size
+        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0);
         asm.mov_rr(Reg::Rdx, Reg::R12);
         asm.mov_rr(Reg::R8, Reg::R13);
         self.emit_writefile(asm, 0, 0, 0)?;
-        // Pop the output path string (24 bytes: 3 pushes)
         asm.add_imm(Reg::Rsp, 24);
-
         asm.ret();
         Ok(())
     }
