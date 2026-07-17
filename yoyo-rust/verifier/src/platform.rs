@@ -289,11 +289,12 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.mov_rr(Reg::Rdx, Reg::R13);
         asm.mov_rr(Reg::R8, Reg::R14);
-        asm.mov_imm64(Reg::R9, 0);
-        asm.sub_imm(Reg::Rsp, 0x28);
+        asm.sub_imm(Reg::Rsp, 0x30);
+        asm.mov_qword_rsp_disp(0x28, 0);
+        asm.lea_rsp_sib32(Reg::R9, 0x28);
         asm.mov_qword_rsp_disp(0x20, 0);
         asm.call_iat_thunk(Win32Api::WriteFile as u8);
-        asm.add_imm(Reg::Rsp, 0x28);
+        asm.add_imm(Reg::Rsp, 0x30);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.shadow_frame();
         asm.call_iat_thunk(Win32Api::CloseHandle as u8);
@@ -334,8 +335,8 @@ impl Platform for Win32Platform {
         asm.push(Reg::Rbx);
         asm.push(Reg::R15);
         asm.push(Reg::Rsi);
-        asm.sub_imm(Reg::Rsp, 0x1000);
-        asm.lea_rsp_sib32(Reg::R15, 0x800);
+        asm.sub_imm(Reg::Rsp, 0x1008);
+        asm.lea_rsp_sib32(Reg::R15, 0x808);
         asm.load_mem(Reg::Rsi, Reg::Rdi, 0);
         asm.lea_rsp_sib32(Reg::Rdi, 0x100);
 
@@ -399,7 +400,7 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::Rdx, Reg::Rax);
         self.emit_writefile(asm, 0, 0, 0)?;
 
-        asm.add_imm(Reg::Rsp, 0x1000);
+        asm.add_imm(Reg::Rsp, 0x1008);
         asm.pop(Reg::Rsi);
         asm.pop(Reg::R15);
         asm.pop(Reg::Rbx);
