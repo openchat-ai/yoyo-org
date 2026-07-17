@@ -20,10 +20,8 @@ const BSS_RVA: u32 = 0x3000;       // .bss section RVA (zero-initialized, R/W)
                                   // overlaps with .text — keep BSS_RVA so any legacy references still compile.
 const BSS_VSIZE: u32 = 0x1000;     // 4096 bytes = 256 slots × 16 bytes headroom
 
-/// Win32 v0.4 startup layout — see Win32Platform::startup_blob.
-/// MOV_R15_OFFSET = 2 (imm64 placeholder right after 0x49 0xBF).
-/// The `E8` call offset is found by scanning startup blob at link time.
-const MOV_R15_OFFSET: usize = 2;
+/// Win32/Linux startup blob contains `E8` (call) or `E9` (jmp) placeholder.
+/// The rel32 offset is patched at link time to point past the startup blob.
 
 /// Post-link validation: scan `.text` for suspicious ModRM patterns.
 ///
@@ -303,10 +301,10 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(subsys_off + 2, 0);
     pe[subsys_off..subsys_off + 2].copy_from_slice(&3u16.to_le_bytes());
 
-    // DllCharacteristics (offset 0x46) — v0.4: set DYNAMIC_BASE (0x40) for Win10 loader to commit BSS pages
+    // DllCharacteristics (offset 0x46) — v0.4: set DYNAMIC_BASE (0x40) + NX_COMPAT (0x100) for Win10
     let dllchars_off = (opt_start + 0x46) as usize;
     pe.resize(dllchars_off + 2, 0);
-    pe[dllchars_off..dllchars_off + 2].copy_from_slice(&0x0040u16.to_le_bytes());
+    pe[dllchars_off..dllchars_off + 2].copy_from_slice(&0x0140u16.to_le_bytes());
 
     // SizeOfStackReserve (offset 0x48, u64) — Win64 default 1 MB
     let stack_rsv_off = (opt_start + 0x48) as usize;
@@ -408,43 +406,16 @@ fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
     combined.extend_from_slice(startup);
     combined.extend_from_slice(handler);
 
-    // Patch startup blob's Win32 fields:
-    //  1. mov r15, BSS_ADDRESS — IMM64 at offset 6..14
-    //  2. call rel32 H_00 — rel32 at offset 15..19
-    //
-    // Linux jmp at offset 0 → rel32 at offset 1..5.
-    //
-    // Detect which by first byte:
-    //   - 0xE9 (jmp rel32) → Linux
-    //   - anything else (sub rsp, 8: 48 83 EC 08) → Win32
-
-    if startup.len() >= 5 && startup[0] == 0xE9 {
-        // Linux jmp at offset 0
-        let rel32 = startup.len() as i32 - 5;
-        if rel32 != 0 {
-            combined[1..5].copy_from_slice(&(rel32 as i32).to_le_bytes());
-        }
-    } else {
-        // Find 0x49 0xBF (mov r15, imm64) and patch the IMM64 field
-        if startup.len() >= 10 && startup[0] == 0x49 && startup[1] == 0xBF {
-            // v0.4: r15 is overwritten by H_00 via `lea r15, [rsp+0x800]`,
-            // so this MOV is effectively a no-op. Patch with 0 to avoid
-            // creating a dependency on .bss layout for the startup code.
-            let r15_imm: u64 = 0;
-            combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
-                .copy_from_slice(&r15_imm.to_le_bytes());
-        }
-
-        // Scan for E8 (call) anywhere in startup and patch rel32
-        // Target = first byte after startup (= start of H_00 user code)
-        for i in 0..startup.len().saturating_sub(5) {
-            if startup[i] == 0xE8 {
-                let rel32 = startup.len() as i32 - (i as i32 + 5);
-                if rel32 != 0 {
-                    combined[i + 1..i + 5].copy_from_slice(&(rel32 as i32).to_le_bytes());
-                }
-                break;
+    // Scan for call (E8) or jmp (E9) in startup blob and patch rel32.
+    // Target = first byte after startup (= start of H_00 handler code).
+    for i in 0..startup.len().saturating_sub(5) {
+        let b = startup[i];
+        if b == 0xE8 || b == 0xE9 {
+            let rel32 = startup.len() as i32 - (i as i32 + 5);
+            if rel32 != 0 {
+                combined[i + 1..i + 5].copy_from_slice(&(rel32 as i32).to_le_bytes());
             }
+            break;
         }
     }
 
@@ -492,7 +463,7 @@ fn collect_iat_fixups(code: &[u8], code_base: u32) -> Vec<(u32, Win32Api)> {
                 13 => Win32Api::LibyoyoPrint,
                 14 => Win32Api::LibyoyoTime,
                 15 => Win32Api::GetCommandLineA,
-                _ => return Vec::new(),
+                _ => { i += 6; continue; },
             };
             fixups.push((code_base + i as u32, api));
             i += 6;
@@ -684,13 +655,18 @@ mod tests {
 
     #[test]
     fn build_text_linux_startup() {
-        let startup = vec![0xE9, 0x00, 0x00, 0x00, 0x00]; // jmp H_00
+        // Linux startup: sub rsp,0x1008 (7B) + lea r15,[rsp+0x808] (8B) + jmp +rel32 (5B) = 20B
+        let mut startup = vec![
+            0x48, 0x81, 0xEC, 0x08, 0x10, 0x00, 0x00, // sub rsp, 0x1008 (7B)
+            0x4C, 0x8D, 0xBC, 0x24, 0x08, 0x08, 0x00, 0x00, // lea r15, [rsp+0x808] (8B)
+            0xE9, 0x00, 0x00, 0x00, 0x00, // jmp +rel32 → H_00 (5B)
+        ];
+        assert_eq!(startup.len(), 20);
         let handler = vec![0xC3]; // ret
         let result = build_text(&startup, &handler);
-        // jmp at offset 0, 5 bytes. rel32 = 5 - 5 = 0. Wait: startup.len() - 5 = 5 - 5 = 0
-        // So rel32 should remain 0 because startup.len() = 5 and handler starts right after.
-        // Actually rel32 = startup.len() - 5 = 0. That makes sense - jmp to next byte.
-        assert_eq!(result.bytes, vec![0xE9, 0x00, 0x00, 0x00, 0x00, 0xC3]);
+        // jmp at offset 15, 5 bytes. rel32 = 20 - (15+5) = 0. jmp to next byte (handler start).
+        assert_eq!(result.bytes[16..20], (0i32).to_le_bytes());
+        assert_eq!(result.bytes.len(), 21);
     }
 
     #[test]

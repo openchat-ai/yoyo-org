@@ -1,6 +1,6 @@
 use crate::assembler::X64Assembler;
 use crate::isa::TirOp;
-use crate::platform::{emit_str_idx_addr, IatThunk, Platform, PlatformKind};
+use crate::platform::{emit_str_idx_addr, IatThunk, Platform, PlatformKind, Win32Api};
 use crate::tir::TirInst;
 use crate::types::Reg;
 
@@ -43,31 +43,25 @@ fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u
     let mut chunks: Vec<X86Chunk> = Vec::new();
     let mut handler_offsets = [u32::MAX; 256];
     let mut pending: Vec<PendingFixup> = Vec::new();
-    let mut skip_body = false;
-
+    let mut skipping_h00_body = false;
     for inst in tir {
         let start = asm.bytes.len() as u32;
 
         let is_handler = matches!(inst.op, TirOp::HandlerStart { .. });
         if is_handler {
-            skip_body = false;
             if let TirOp::HandlerStart { hh } = &inst.op {
                 handler_offsets[*hh as usize] = start;
-                if *hh == 0x40 && matches!(platform, PlatformKind::Win32) {
+                if *hh == 0 {
+                    // H_00: full I/O pipeline (LoadFile + WriteFile), delegated to platform
                     platform.emit_h00_code(&mut asm).unwrap();
-                    skip_body = true;
-                    let end = asm.bytes.len() as u32;
-                    chunks.push(X86Chunk {
-                        byte_offset: start,
-                        bytes: asm.bytes[start as usize..end as usize].to_vec(),
-                        tir_source_line: inst.source_line,
-                    });
+                    skipping_h00_body = true;
+                } else {
+                    skipping_h00_body = false;
                 }
             }
             continue;
         }
-
-        if skip_body {
+        if skipping_h00_body {
             continue;
         }
 

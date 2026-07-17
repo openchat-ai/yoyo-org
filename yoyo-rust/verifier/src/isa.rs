@@ -43,16 +43,16 @@ isaproc::isa! {
 0x00A0 RAW_BYTE  byte  => raw_byte byte   ; emit single byte literal
 0x00A1 RAW_BYTES bytes => raw_bytes bytes ; emit block of literal bytes
 
-// ── libyoyo_* Calls (Phase 4c) ─────────────────────────────────────
-0x0052 LIBYOYO_ALLOC slot sz      => emit_libyoyo_alloc slot sz
-0x0053 LIBYOYO_FREE slot          => emit_libyoyo_free slot
-0x0054 LIBYOYO_OPEN slot str_idx  => emit_libyoyo_open slot str_idx
-0x0055 LIBYOYO_READ slot fd sz    => emit_libyoyo_read slot fd sz
-0x0056 LIBYOYO_WRITE fd slot sz   => emit_libyoyo_write fd slot sz
-0x0057 LIBYOYO_CLOSE fd           => emit_libyoyo_close fd
-0x0058 LIBYOYO_EXIT slot          => emit_libyoyo_exit slot
-0x0059 LIBYOYO_PRINT slot         => emit_libyoyo_print slot
-0x005A LIBYOYO_TIME slot          => emit_libyoyo_time slot
+// ── libyoyo_* Calls (Phase 4c, opcodes 0xE2-0xEA to avoid conflict with yoyo.ty) ──
+0x00E2 LIBYOYO_ALLOC slot sz      => emit_libyoyo_alloc slot sz
+0x00E3 LIBYOYO_FREE slot          => emit_libyoyo_free slot
+0x00E4 LIBYOYO_OPEN slot str_idx  => emit_libyoyo_open slot str_idx
+0x00E5 LIBYOYO_READ slot fd sz    => emit_libyoyo_read slot fd sz
+0x00E6 LIBYOYO_WRITE fd slot sz   => emit_libyoyo_write fd slot sz
+0x00E7 LIBYOYO_CLOSE fd           => emit_libyoyo_close fd
+0x00E8 LIBYOYO_EXIT slot          => emit_libyoyo_exit slot
+0x00E9 LIBYOYO_PRINT slot         => emit_libyoyo_print slot
+0x00EA LIBYOYO_TIME slot          => emit_libyoyo_time slot
 
 // ── Legacy Syscall / Complex (deprecated by libyoyo_* above) ───────────
 0x0020 ALLOC slot sz      => emit_alloc slot sz     ; VirtualAlloc (via platform) - deprecated

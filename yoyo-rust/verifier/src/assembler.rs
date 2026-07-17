@@ -39,6 +39,14 @@ impl X64Assembler {
         self.bytes[offset]
     }
 
+    /// When r/m low3 == 4 (RSP/R12), emit mandatory SIB byte `0x24` = [base] no index.
+    /// Must be called after `emit_modrm` whenever a base register is used as r/m.
+    fn maybe_emit_sib(&mut self, base: Reg) {
+        if base.low3() == 4 {
+            self.emit_u8(0x24);
+        }
+    }
+
     // ── Label / fixup system (for short jumps rel8 inside emitted code) ──
 
     /// Allocate a new label slot. Returns label id — use with `set_label` + `jmp_rel8_label` / `jcc_rel8_label`.
@@ -289,11 +297,14 @@ impl X64Assembler {
         self.emit_u8(0x8B);
         if disp == 0 {
             self.emit_modrm(0, reg.low3(), base.low3());
+            self.maybe_emit_sib(base);
         } else if disp >= -128 && disp <= 127 {
             self.emit_modrm(1, reg.low3(), base.low3());
+            self.maybe_emit_sib(base);
             self.emit_u8(disp as u8);
         } else {
             self.emit_modrm(2, reg.low3(), base.low3());
+            self.maybe_emit_sib(base);
             self.emit_i32(disp);
         }
     }
@@ -304,11 +315,14 @@ impl X64Assembler {
         self.emit_u8(0x8D);
         if disp == 0 {
             self.emit_modrm(0, reg.low3(), base.low3());
+            self.maybe_emit_sib(base);
         } else if disp >= -128 && disp <= 127 {
             self.emit_modrm(1, reg.low3(), base.low3());
+            self.maybe_emit_sib(base);
             self.emit_u8(disp as u8);
         } else {
             self.emit_modrm(2, reg.low3(), base.low3());
+            self.maybe_emit_sib(base);
             self.emit_i32(disp);
         }
     }
@@ -334,23 +348,28 @@ impl X64Assembler {
         self.emit_u8(0xB6); // MOVZX r32, r/m8
         if disp >= -128 && disp <= 127 {
             self.emit_modrm(1, 0, base.low3()); // mod=01, reg=000(eax), rm=base
+            self.maybe_emit_sib(base);
             self.emit_u8(disp as u8);
         } else {
             self.emit_modrm(2, 0, base.low3()); // mod=10, reg=000(eax), rm=base
+            self.maybe_emit_sib(base);
             self.emit_i32(disp);
         }
     }
 
     // ── Stack frame helpers ──
 
-    /// `sub rsp, 0x28`
+    /// `sub rsp, 0x20` — standard x64 shadow space (4 × 8 bytes).
+    /// Keeps RSP 16-byte aligned BEFORE the CALL instruction
+    /// so that inside the callee RSP is 8 bytes off from 16-byte
+    /// alignment (as required by the Windows x64 calling convention).
     pub fn shadow_frame(&mut self) {
-        self.sub_imm(Reg::Rsp, 0x28);
+        self.sub_imm(Reg::Rsp, 0x20);
     }
 
-    /// `add rsp, 0x28`
+    /// `add rsp, 0x20`
     pub fn shadow_ret(&mut self) {
-        self.add_imm(Reg::Rsp, 0x28);
+        self.add_imm(Reg::Rsp, 0x20);
     }
 
     /// `mov byte [base], val` (e.g. mov byte [rsi], al = 88 06)
@@ -358,18 +377,21 @@ impl X64Assembler {
         // REX-free for low8 registers: 0x88 + ModRM
         self.emit_u8(0x88);
         self.emit_modrm(0, val.low3(), base.low3());
+        self.maybe_emit_sib(base);
     }
 
     /// `mov reg, byte [base]` (e.g. mov al, [rsi] = 8A 06)
     pub fn mov_reg_byte_mem(&mut self, dst: Reg, base: Reg) {
         self.emit_u8(0x8A);
         self.emit_modrm(0, dst.low3(), base.low3());
+        self.maybe_emit_sib(base);
     }
 
     /// `mov byte [base], imm8` (e.g. C6 06 00 = mov byte [rsi], 0)
     pub fn mov_byte_mem_imm(&mut self, base: Reg, imm: u8) {
         self.emit_u8(0xC6);
         self.emit_modrm(0, 0, base.low3());
+        self.maybe_emit_sib(base);
         self.emit_u8(imm);
     }
 
@@ -377,6 +399,7 @@ impl X64Assembler {
     pub fn cmp_byte_mem_imm(&mut self, base: Reg, imm: u8) {
         self.emit_u8(0x80);
         self.emit_modrm(0, 7, base.low3());
+        self.maybe_emit_sib(base);
         self.emit_u8(imm);
     }
 
@@ -443,9 +466,11 @@ impl X64Assembler {
         self.emit_u8(0xB6);
         if oo >= -128 && oo <= 127 {
             self.emit_modrm(1, 0, base.low3());
+            self.maybe_emit_sib(base);
             self.emit_u8(oo as u8);
         } else {
             self.emit_modrm(2, 0, base.low3());
+            self.maybe_emit_sib(base);
             self.emit_i32(oo);
         }
     }

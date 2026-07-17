@@ -74,11 +74,10 @@ pub trait Platform: Debug {
     /// replacing legacy `str_idx` (compile-time string-table index).
     fn emit_loadfile(&self, asm: &mut X64Assembler, slot: u16, str_slot: u16) -> IsaResult<()>;
     fn emit_writefile(&self, asm: &mut X64Assembler, id: u16, str_slot: u16, sz: u16) -> IsaResult<()>;
-    /// Emit the H_00 entry handler body (prologue, argv parsing, load/write, epilogue).
-    /// Called by emit_inner when HandlerStart {hh: 0x40} is encountered on Win32.
+    /// H_00 entry handler: hardcoded load "input.ky", write "output.exe".
     /// Default: emit only `ret` (C3) for platforms without a defined H_00.
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
-        asm.ret(); // minimal stub
+        asm.ret();
         Ok(())
     }
     fn startup_blob(&self) -> Vec<u8>;
@@ -227,12 +226,12 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 1);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 3);
-        asm.sub_imm(Reg::Rsp, 0x38);
+        asm.sub_imm(Reg::Rsp, 0x40);  // 0x20 shadow + 3×8 stack = 0x38, padded to 16-byte boundary
         asm.mov_qword_rsp_disp(0x20, 3);
         asm.mov_qword_rsp_disp(0x28, 0x80);
         asm.mov_qword_rsp_disp(0x30, 0);
         asm.call_iat_thunk(Win32Api::CreateFileA as u8);
-        asm.add_imm(Reg::Rsp, 0x38);
+        asm.add_imm(Reg::Rsp, 0x40);
         asm.mov_rr(Reg::R12, Reg::Rax);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.mov_imm64(Reg::Rdx, 0);
@@ -252,10 +251,10 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::Rdx, Reg::R14);
         asm.mov_rr(Reg::R8, Reg::R13);
         asm.mov_imm64(Reg::R9, 0);
-        asm.sub_imm(Reg::Rsp, 0x28);
+        asm.sub_imm(Reg::Rsp, 0x30);  // 0x20 shadow + 1×8 stack = 0x28, padded to 16-byte boundary
         asm.mov_qword_rsp_disp(0x20, 0);
         asm.call_iat_thunk(Win32Api::ReadFile as u8);
-        asm.add_imm(Reg::Rsp, 0x28);
+        asm.add_imm(Reg::Rsp, 0x30);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.shadow_frame();
         asm.call_iat_thunk(Win32Api::CloseHandle as u8);
@@ -279,12 +278,12 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 0);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 2);
-        asm.sub_imm(Reg::Rsp, 0x38);
+        asm.sub_imm(Reg::Rsp, 0x40);  // 0x20 shadow + 3×8 stack = 0x38, padded to 16-byte boundary
         asm.mov_qword_rsp_disp(0x20, 2);
         asm.mov_qword_rsp_disp(0x28, 0);
         asm.mov_qword_rsp_disp(0x30, 0);
         asm.call_iat_thunk(Win32Api::CreateFileA as u8);
-        asm.add_imm(Reg::Rsp, 0x38);
+        asm.add_imm(Reg::Rsp, 0x40);
         asm.mov_rr(Reg::R12, Reg::Rax);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.mov_rr(Reg::Rdx, Reg::R13);
@@ -306,103 +305,78 @@ impl Platform for Win32Platform {
     }
 
     fn startup_blob(&self) -> Vec<u8> {
-        // Startup: set r15 = BSS base, then call H_00, then ret.
-        // mov r15, BSS_RVA (imm64 placeholder at offset 2..10, patched by pe_link)
-        // call H_00 (rel32 placeholder at offset 10..14, patched by pe_link)
-        // ret
+        // Win32 startup: set up stack state area, call H_00, clean up and return.
+        // Registers saved per x64 calling convention (r12-r15, rbx, rsi are callee-saved).
+        // r15 = stack-based state area pointer (lea r15, [rsp+0x808]).
+        //
+        // Layout: push 6 regs, sub rsp, lea r15, call H_00, add rsp, pop 6 regs, ret
         let mut a = X64Assembler::new();
-        a.mov_imm64(Reg::R15, 0);  // placeholder — pe_link patches with IMAGE_BASE + BSS_RVA
-        a.call_rel32_placeholder();
+        a.push(Reg::R12);
+        a.push(Reg::R13);
+        a.push(Reg::R14);
+        a.push(Reg::Rbx);
+        a.push(Reg::R15);
+        a.push(Reg::Rsi);
+        a.sub_imm(Reg::Rsp, 0x1008);
+        a.lea_rsp_sib32(Reg::R15, 0x808);
+        a.call_rel32_placeholder(); // → H_00 (patched by pe_link)
+        a.add_imm(Reg::Rsp, 0x1008);
+        a.pop(Reg::Rsi);
+        a.pop(Reg::R15);
+        a.pop(Reg::Rbx);
+        a.pop(Reg::R14);
+        a.pop(Reg::R13);
+        a.pop(Reg::R12);
         a.ret();
         a.into_bytes()
     }
 
+    /// H_00 entry handler: hardcoded pipeline that reads "input.ky",
+    /// copies its contents to "output.exe". Mirrors the legacy yoy0 v0.4
+    /// main(): argv parsing is skipped, both paths are constants.
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
-        asm.push(Reg::R12);
-        asm.push(Reg::R13);
-        asm.push(Reg::R14);
-        asm.push(Reg::Rbx);
-        asm.push(Reg::R15);
-        asm.push(Reg::Rsi);
-        asm.sub_imm(Reg::Rsp, 0x1008);
-        asm.lea_rsp_sib32(Reg::R15, 0x808);
-        asm.load_mem(Reg::Rsi, Reg::Rdi, 0);
-        asm.lea_rsp_sib32(Reg::Rdi, 0x100);
-
-        let copy_loop = asm.alloc_label();
-        asm.set_label(copy_loop);
-        asm.mov_reg_byte_mem(Reg::Rax, Reg::Rsi);
-        asm.mov_byte_mem_reg(Reg::Rax, Reg::Rdi);
-        asm.test_r8_r8(Reg::Rax, Reg::Rax);
-        let copy_done = asm.alloc_label();
-        asm.jcc_rel8_label(4, copy_done);
-        asm.inc(Reg::Rsi);
-        asm.inc(Reg::Rdi);
-        asm.jmp_rel8_label(copy_loop);
-
-        asm.set_label(copy_done);
-        asm.lea_rsp_sib32(Reg::Rsi, 0x100);
-
-        let scan0 = asm.alloc_label();
-        asm.set_label(scan0);
-        asm.cmp_byte_mem_imm(Reg::Rsi, 0x20);
-        let null0 = asm.alloc_label();
-        asm.jcc_rel8_label(4, null0);
-        asm.cmp_byte_mem_imm(Reg::Rsi, 0);
-        let argv1_start_lbl = asm.alloc_label();
-        asm.jcc_rel8_label(4, argv1_start_lbl);
-        asm.inc(Reg::Rsi);
-        asm.jmp_rel8_label(scan0);
-
-        asm.set_label(null0);
-        asm.mov_byte_mem_imm(Reg::Rsi, 0);
-        asm.inc(Reg::Rsi);
-
-        asm.set_label(argv1_start_lbl);
-        asm.mov_rr(Reg::R12, Reg::Rsi);
-
-        let scan1 = asm.alloc_label();
-        asm.set_label(scan1);
-        asm.cmp_byte_mem_imm(Reg::Rsi, 0x20);
-        let null1 = asm.alloc_label();
-        asm.jcc_rel8_label(4, null1);
-        asm.cmp_byte_mem_imm(Reg::Rsi, 0);
-        let no_argv2_lbl = asm.alloc_label();
-        asm.jcc_rel8_label(4, no_argv2_lbl);
-        asm.inc(Reg::Rsi);
-        asm.jmp_rel8_label(scan1);
-
-        asm.set_label(null1);
-        asm.mov_byte_mem_imm(Reg::Rsi, 0);
-        asm.inc(Reg::Rsi);
-
-        asm.set_label(no_argv2_lbl);
-        asm.mov_rr(Reg::R13, Reg::Rsi);
-
-        asm.resolve_fixups();
-
-        asm.mov_rr(Reg::Rsi, Reg::R12);
+        // ── 1. Load "input.ky" ──────────────────────────────────────
+        // Push null padding FIRST, then the string, so that after both
+        // pushes, [RSP+0] = "input.ky" and [RSP+8] = 0 (null terminator).
+        asm.mov_imm64(Reg::Rax, 0);
+        asm.push(Reg::Rax); // [RSP] = 0 (null padding)
+        asm.mov_imm64(Reg::Rax, 0x796B2E7475706E69); // "input.ky" (LE: 69 6E 70 75 74 2E 6B 79)
+        asm.push(Reg::Rax); // [RSP] = "input.ky"
+        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0); // RSI → "input.ky"
+        // emit_loadfile: RAX=buffer, RDX=size on return
         self.emit_loadfile(asm, 0, 0)?;
+        // Save buffer/size in callee-saved regs (R12-R14 are restored
+        // across emit_loadfile, so we can use them safely afterwards).
+        asm.mov_rr(Reg::R12, Reg::Rax); // R12 = buffer ptr
+        asm.mov_rr(Reg::R13, Reg::Rdx); // R13 = file size
+        // Pop the input path string (16 bytes)
+        asm.add_imm(Reg::Rsp, 16);
 
-        asm.mov_rr(Reg::Rsi, Reg::R13);
-        asm.mov_rr(Reg::R8, Reg::Rdx);
-        asm.mov_rr(Reg::Rdx, Reg::Rax);
+        // ── 2. Write "output.exe" ───────────────────────────────────
+        // Push null terminator FIRST, then "output.e" + "xe\0..."
+        // "output.exe" = 10 chars: o u t p u t . e x e
+        // First 8 chars: "output.e" = 6F 75 74 70 75 74 2E 65
+        // Next 2 chars + padding: "xe\0\0\0\0\0\0" = 78 65 00 ...
+        asm.mov_imm64(Reg::Rax, 0); // null padding
+        asm.push(Reg::Rax);
+        asm.mov_imm64(Reg::Rax, 0x0000000000006578); // "xe\0\0\0\0\0\0"
+        asm.push(Reg::Rax);
+        asm.mov_imm64(Reg::Rax, 0x652E74757074756F); // "output.e" LE: 6F 75 74 70 75 74 2E 65
+        asm.push(Reg::Rax);
+        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0); // RSI → "output.exe"
+        // emit_writefile expects: RSI=path, RDX=buffer, R8=size
+        asm.mov_rr(Reg::Rdx, Reg::R12);
+        asm.mov_rr(Reg::R8, Reg::R13);
         self.emit_writefile(asm, 0, 0, 0)?;
+        // Pop the output path string (24 bytes: 3 pushes)
+        asm.add_imm(Reg::Rsp, 24);
 
-        asm.add_imm(Reg::Rsp, 0x1008);
-        asm.pop(Reg::Rsi);
-        asm.pop(Reg::R15);
-        asm.pop(Reg::Rbx);
-        asm.pop(Reg::R14);
-        asm.pop(Reg::R13);
-        asm.pop(Reg::R12);
         asm.ret();
         Ok(())
     }
 }
 
 // ── Linux Platform ──────────────────────────────────────────────────
-
 #[derive(Debug)]
 pub struct LinuxPlatform;
 
@@ -470,12 +444,17 @@ impl Platform for LinuxPlatform {
     }
 
     fn startup_blob(&self) -> Vec<u8> {
+        // Linux startup: set up stack state area, then jmp to H_00.
+        // ELF entry point — no return address, H_00 exits via syscall.
         let mut a = X64Assembler::new();
-        a.jmp_rel32_placeholder();
+        a.sub_imm(Reg::Rsp, 0x1008);
+        a.lea_rsp_sib32(Reg::R15, 0x808);
+        a.jmp_rel32_placeholder(); // → H_00 (patched by pe_link)
         a.into_bytes()
     }
 
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
+        // Linux H_00: minimal stub (no I/O yet)
         asm.ret();
         Ok(())
     }
