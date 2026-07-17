@@ -226,10 +226,11 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 1);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 3);
-        asm.sub_imm(Reg::Rsp, 0x40);  // 0x20 shadow + 3×8 stack = 0x38, padded to 16-byte boundary
-        asm.mov_qword_rsp_disp(0x20, 3);
-        asm.mov_qword_rsp_disp(0x28, 0x80);
-        asm.mov_qword_rsp_disp(0x30, 0);
+        // sub rsp must be 16-byte aligned: 0x20 shadow + 3×8 args = 0x38 → 0x40
+        asm.sub_imm(Reg::Rsp, 0x40);
+        asm.mov_qword_rsp_disp(0x20, 3);   // 5th: dwCreationDisposition = OPEN_EXISTING
+        asm.mov_qword_rsp_disp(0x28, 0x80); // 6th: dwFlagsAndAttributes = FILE_ATTRIBUTE_NORMAL
+        asm.mov_qword_rsp_disp(0x30, 0);   // 7th: hTemplateFile
         asm.call_iat_thunk(Win32Api::CreateFileA as u8);
         asm.add_imm(Reg::Rsp, 0x40);
         asm.mov_rr(Reg::R12, Reg::Rax);
@@ -251,7 +252,11 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::Rdx, Reg::R14);
         asm.mov_rr(Reg::R8, Reg::R13);
         asm.mov_imm64(Reg::R9, 0);
-        asm.sub_imm(Reg::Rsp, 0x30);  // 0x20 shadow + 1×8 stack = 0x28, padded to 16-byte boundary
+        // 4 args in regs + lpNumberOfBytesRead on stack = shadow + 1 slot
+        // 0x20 shadow + 1×8 = 0x28; round up to 0x30 for 16-byte alignment
+        asm.sub_imm(Reg::Rsp, 0x30);
+        asm.lea_rsp_sib32(Reg::R9, 0x28);   // R9 = &bytesRead slot
+        asm.mov_qword_rsp_disp(0x28, 0);    // bytesRead slot
         asm.mov_qword_rsp_disp(0x20, 0);
         asm.call_iat_thunk(Win32Api::ReadFile as u8);
         asm.add_imm(Reg::Rsp, 0x30);
@@ -278,19 +283,22 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 0);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 2);
-        asm.sub_imm(Reg::Rsp, 0x40);  // 0x20 shadow + 3×8 stack = 0x38, padded to 16-byte boundary
-        asm.mov_qword_rsp_disp(0x20, 2);
-        asm.mov_qword_rsp_disp(0x28, 0);
-        asm.mov_qword_rsp_disp(0x30, 0);
+        // sub rsp must be 16-byte aligned: 0x20 shadow + 3×8 args = 0x38 → 0x40
+        asm.sub_imm(Reg::Rsp, 0x40);
+        asm.mov_qword_rsp_disp(0x20, 2);  // 5th: dwCreationDisposition = CREATE_ALWAYS
+        asm.mov_qword_rsp_disp(0x28, 0);  // 6th: dwFlagsAndAttributes
+        asm.mov_qword_rsp_disp(0x30, 0);  // 7th: hTemplateFile
         asm.call_iat_thunk(Win32Api::CreateFileA as u8);
         asm.add_imm(Reg::Rsp, 0x40);
         asm.mov_rr(Reg::R12, Reg::Rax);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.mov_rr(Reg::Rdx, Reg::R13);
         asm.mov_rr(Reg::R8, Reg::R14);
+        // 4 args in regs + lpNumberOfBytesWritten on stack = shadow + 1 slot
+        // 0x20 shadow + 1×8 = 0x28; round up to 0x30 for 16-byte alignment
         asm.sub_imm(Reg::Rsp, 0x30);
-        asm.mov_qword_rsp_disp(0x28, 0);
-        asm.lea_rsp_sib32(Reg::R9, 0x28);
+        asm.lea_rsp_sib32(Reg::R9, 0x28);   // R9 = &bytesWritten slot
+        asm.mov_qword_rsp_disp(0x28, 0);    // bytesWritten slot
         asm.mov_qword_rsp_disp(0x20, 0);
         asm.call_iat_thunk(Win32Api::WriteFile as u8);
         asm.add_imm(Reg::Rsp, 0x30);
@@ -335,37 +343,81 @@ impl Platform for Win32Platform {
     /// copies its contents to "output.exe". Mirrors the legacy yoy0 v0.4
     /// main(): argv parsing is skipped, both paths are constants.
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
-        // H_00 entry handler: hardcoded LoadFile("input.ky") + WriteFile("output.exe").
-        // GetCommandLineA is invoked (and the result discarded) to verify
-        // the IAT[15] kernel32.dll import is wired and resolvable at load time.
+        // Step F: + emit_writefile(R13=argv[2], RDX=buf, R8=size)
         asm.sub_imm(Reg::Rsp, 0x20);
         asm.call_iat_thunk(Win32Api::GetCommandLineA as u8);
         asm.add_imm(Reg::Rsp, 0x20);
-        // ignore RAX; carry on with hardcoded paths
+        asm.mov_rr(Reg::R14, Reg::Rax);
 
-        // "input.ky" (null-pad + string, in push order)
-        asm.mov_imm64(Reg::Rax, 0);
-        asm.push(Reg::Rax);
-        asm.mov_imm64(Reg::Rax, 0x796B2E7475706E69);
-        asm.push(Reg::Rax);
-        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0);
+        asm.push(Reg::R12);
+        asm.push(Reg::R13);
+        asm.push(Reg::R14);
+        asm.push(Reg::Rbx);
+        asm.push(Reg::R15);
+        asm.push(Reg::Rsi);
+        asm.sub_imm(Reg::Rsp, 0x1008);
+        asm.lea_rsp_sib32(Reg::R15, 0x808);
+
+        asm.mov_rr(Reg::Rsi, Reg::R14);
+        asm.lea_rsp_sib32(Reg::Rdi, 0x100);
+        let copy_loop = asm.alloc_label();
+        let copy_done = asm.alloc_label();
+        asm.set_label(copy_loop);
+        asm.mov_reg_byte_mem(Reg::Rax, Reg::Rsi);
+        asm.mov_byte_mem_reg(Reg::Rdi, Reg::Rax);
+        asm.test_r8_r8(Reg::Rax, Reg::Rax);
+        asm.jcc_rel8_label(4, copy_done);
+        asm.inc(Reg::Rsi);
+        asm.inc(Reg::Rdi);
+        asm.jmp_rel8_label(copy_loop);
+        asm.set_label(copy_done);
+
+        asm.lea_rsp_sib32(Reg::Rsi, 0x100);
+        let scan0 = asm.alloc_label();
+        let space0 = asm.alloc_label();
+        asm.set_label(scan0);
+        asm.cmp_byte_mem_imm(Reg::Rsi, 0x20);
+        asm.jcc_rel8_label(4, space0);
+        asm.inc(Reg::Rsi);
+        asm.jmp_rel8_label(scan0);
+        asm.set_label(space0);
+        asm.mov_byte_mem_imm(Reg::Rsi, 0);
+        asm.inc(Reg::Rsi);
+        asm.mov_rr(Reg::R12, Reg::Rsi);
+
+        let scan1 = asm.alloc_label();
+        let space1 = asm.alloc_label();
+        asm.set_label(scan1);
+        asm.cmp_byte_mem_imm(Reg::Rsi, 0x20);
+        asm.jcc_rel8_label(4, space1);
+        asm.inc(Reg::Rsi);
+        asm.jmp_rel8_label(scan1);
+        asm.set_label(space1);
+        asm.mov_byte_mem_imm(Reg::Rsi, 0);
+        asm.inc(Reg::Rsi);
+        asm.mov_rr(Reg::R13, Reg::Rsi);
+
+        // emit_loadfile(R12=argv[1]) → RAX=buf, RDX=size
+        asm.mov_rr(Reg::Rsi, Reg::R12);
         self.emit_loadfile(asm, 0, 0)?;
-        asm.mov_rr(Reg::R12, Reg::Rax);
-        asm.mov_rr(Reg::R13, Reg::Rdx);
-        asm.add_imm(Reg::Rsp, 16);
 
-        // "output.exe"
-        asm.mov_imm64(Reg::Rax, 0);
-        asm.push(Reg::Rax);
-        asm.mov_imm64(Reg::Rax, 0x0000000000006578);
-        asm.push(Reg::Rax);
-        asm.mov_imm64(Reg::Rax, 0x652E74757074756F);
-        asm.push(Reg::Rax);
-        asm.lea_mem(Reg::Rsi, Reg::Rsp, 0);
-        asm.mov_rr(Reg::Rdx, Reg::R12);
-        asm.mov_rr(Reg::R8, Reg::R13);
+        // emit_writefile(R13=argv[2], RDX=buf, R8=size)
+        // emit_loadfile pushed R12-R14 internally, so R13 still = argv[2].
+        asm.mov_rr(Reg::R12, Reg::Rax); // R12 = buf (clobbers argv[1])
+        asm.mov_rr(Reg::R8, Reg::Rdx);  // R8 = size
+        asm.mov_rr(Reg::Rdx, Reg::R12); // RDX = buf
+        asm.mov_rr(Reg::Rsi, Reg::R13); // RSI = argv[2]
         self.emit_writefile(asm, 0, 0, 0)?;
-        asm.add_imm(Reg::Rsp, 24);
+
+        asm.add_imm(Reg::Rsp, 0x1008);
+        asm.pop(Reg::Rsi);
+        asm.pop(Reg::R15);
+        asm.pop(Reg::Rbx);
+        asm.pop(Reg::R14);
+        asm.pop(Reg::R13);
+        asm.pop(Reg::R12);
+
+        asm.resolve_fixups();
         asm.ret();
         Ok(())
     }
