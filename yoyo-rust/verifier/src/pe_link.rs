@@ -150,7 +150,11 @@ fn instr_len(code: &[u8], i: usize) -> usize {
 /// 6. Validates code section for ModRM errors
 /// 7. Writes output PE file
 pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), String> {
-    let combined = build_text(startup, handler_code);
+    // Estimate bss_rva from handler_code length (before build_text)
+    let text_vsize_est = align_up((startup.len() + handler_code.len()) as u32, SECTION_ALIGN);
+    let bss_rva = align_up(TEXT_RVA + text_vsize_est + 0x2000, SECTION_ALIGN);
+
+    let combined = build_text(startup, handler_code, bss_rva);
     let mut code = combined.bytes;
     let text_size = code.len() as u32;
 
@@ -164,7 +168,6 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     let idata_fsize = align_up(idata_bytes.len() as u32, FILE_ALIGN);
     let idata_vsize = align_up(idata_bytes.len() as u32, SECTION_ALIGN);
     let idata_file_off = HEADERS_SIZE + text_fsize;
-    let bss_rva = align_up(idata_rva + idata_vsize, SECTION_ALIGN);
 
     // Patch FF 15 placeholders with correct RIP-relative displacements
     for &(code_off, api) in &fixups {
@@ -206,7 +209,7 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.extend(&0u32.to_le_bytes());      // NumberOfSymbols
     let sizeof_opt_hdr: u16 = 112 + 2 * 8; // PE32+ + 2 data directories (import only)
     pe.extend(&sizeof_opt_hdr.to_le_bytes());
-    pe.extend(&0x002Fu16.to_le_bytes()); // Characteristics
+    pe.extend(&0x0022u16.to_le_bytes()); // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE (no RELOCS_STRIPPED)
 
     // ── Optional header PE32+ ──
     let opt_start = pe.len() as u32;
@@ -320,18 +323,20 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(heap_cmt_off + 8, 0);
     pe[heap_cmt_off..heap_cmt_off + 8].copy_from_slice(&(4u64 << 10).to_le_bytes());
 
-    // LoaderFlags (offset 0x68, u32) — must be 0 (deprecated field)
-    let loader_off = (opt_start + 0x68) as usize;
+    // LoaderFlags (offset 0x64, u32) — must be 0 (deprecated field)
+    let loader_off = (opt_start + 0x64) as usize;
     pe.resize(loader_off + 4, 0);
     // already 0
 
-    // NumberOfRvaAndSizes (offset 0x6C)
-    let nrvas_off = (opt_start + 0x6C) as usize;
+    // NumberOfRvaAndSizes (offset 0x68)
+    let nrvas_off = (opt_start + 0x68) as usize;
     pe.resize(nrvas_off + 4, 0);
     pe[nrvas_off..nrvas_off + 4].copy_from_slice(&2u32.to_le_bytes()); // 2 data dirs
 
-    // Data directory [1]: Import Directory (offset 0x70 + 1*8)
-    let import_dir_off = (opt_start + 0x78) as usize;
+    // Data directory [0]: Export (offset 0x6C) — skip; stays 0
+
+    // Data directory [1]: Import Directory (offset 0x74)
+    let import_dir_off = (opt_start + 0x74) as usize;
     pe.resize(import_dir_off + 8, 0);
     pe[import_dir_off..import_dir_off + 4].copy_from_slice(&idata_rva.to_le_bytes());
     pe[import_dir_off + 4..import_dir_off + 8].copy_from_slice(&(idata_bytes.len() as u32).to_le_bytes());
@@ -395,7 +400,7 @@ struct TextResult {
     bytes: Vec<u8>,
 }
 
-fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
+fn build_text(startup: &[u8], handler: &[u8], bss_rva: u32) -> TextResult {
     let mut combined = Vec::with_capacity(startup.len() + handler.len());
     combined.extend_from_slice(startup);
     combined.extend_from_slice(handler);
@@ -419,10 +424,7 @@ fn build_text(startup: &[u8], handler: &[u8]) -> TextResult {
     } else {
         // Find 0x49 0xBF (mov r15, imm64) and patch the IMM64 field
         if startup.len() >= 10 && startup[0] == 0x49 && startup[1] == 0xBF {
-            // v0.4: r15 is overwritten by H_00 via `lea r15, [rsp+0x800]`,
-            // so this MOV is effectively a no-op. Patch with 0 to avoid
-            // creating a dependency on .bss layout for the startup code.
-            let r15_imm: u64 = 0;
+            let r15_imm = IMAGE_BASE + bss_rva as u64;
             combined[MOV_R15_OFFSET..MOV_R15_OFFSET + 8]
                 .copy_from_slice(&r15_imm.to_le_bytes());
         }
@@ -621,7 +623,7 @@ mod tests {
     fn build_text_linux_startup() {
         let startup = vec![0xE9, 0x00, 0x00, 0x00, 0x00]; // jmp H_00
         let handler = vec![0xC3]; // ret
-        let result = build_text(&startup, &handler);
+        let result = build_text(&startup, &handler, BSS_RVA);
         // jmp at offset 0, 5 bytes. rel32 = 5 - 5 = 0. Wait: startup.len() - 5 = 5 - 5 = 0
         // So rel32 should remain 0 because startup.len() = 5 and handler starts right after.
         // Actually rel32 = startup.len() - 5 = 0. That makes sense - jmp to next byte.
@@ -638,7 +640,7 @@ mod tests {
             0xC3, // ret
         ];
         let handler = vec![0x90]; // nop (H_00 = nop)
-        let result = build_text(&startup, &handler);
+        let result = build_text(&startup, &handler, BSS_RVA);
         // startup.len() = 14. call at offset 4, 5 bytes. rel32 = 14 - (4+5) = 5.
         assert_eq!(result.bytes[5..9], (5i32).to_le_bytes());
         assert_eq!(result.bytes.len(), 15);

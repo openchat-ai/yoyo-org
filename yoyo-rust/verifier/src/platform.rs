@@ -306,25 +306,14 @@ impl Platform for Win32Platform {
     }
 
     fn startup_blob(&self) -> Vec<u8> {
-        let mut a = X64Assembler::new();
-        // mov r15, BSS_RVA (imm64 placeholder at offset 2..10)
-        a.mov_imm64(Reg::R15, 0);
-        // call [rip+rel32] GetCommandLineA → rax = PSTR cmdline
-        a.call_iat_thunk(0x0F);
-        // push rax (cmdline ptr on stack)
-        a.push(Reg::Rax);
-        // mov rdi, rsp (rdi = &cmdline ptr; H_00 reads [rdi])
-        a.mov_rr(Reg::Rdi, Reg::Rsp);
-        // call rel32 (H_00 placeholder at offset 21..25)
-        a.call_rel32_placeholder();
-        // pop rcx (discard saved cmdline)
-        a.pop(Reg::Rcx);
+        // Startup: set r15 = BSS base, then call H_00, then ret.
+        // mov r15, BSS_RVA (imm64 placeholder at offset 2..10, patched by pe_link)
+        // call H_00 (rel32 placeholder at offset 10..14, patched by pe_link)
         // ret
+        let mut a = X64Assembler::new();
+        a.mov_imm64(Reg::R15, 0);  // placeholder — pe_link patches with IMAGE_BASE + BSS_RVA
+        a.call_rel32_placeholder();
         a.ret();
-        // pad NOPs to 48 bytes
-        while a.bytes.len() < 48 {
-            a.nop();
-        }
         a.into_bytes()
     }
 

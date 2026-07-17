@@ -214,48 +214,90 @@ fn emit_inner(tir: &[TirInst], do_fixup: bool, platform: PlatformKind) -> (Vec<u
             }
 
             // ── libyoyo_* calls ──
+            // All libyoyo_* entries in IAT map to kernel32 functions.
+            // Args must use Win64 ABI (rcx/rdx/r8/r9 + shadow space).
             TirOp::LibyoyoAlloc { slot, sz } => {
-                asm.mov_imm64(Reg::Rdi, *sz);
+                // VirtualAlloc(lpAddress=0, dwSize=sz, flAllocationType=0x3000, flProtect=0x40)
+                asm.mov_imm64(Reg::Rcx, 0);
+                asm.mov_imm64(Reg::Rdx, *sz);
+                asm.mov_imm64(Reg::R8, 0x3000);
+                asm.mov_imm64(Reg::R9, 0x40);
+                asm.shadow_frame();
                 IatThunk::LibyoyoAlloc.emit_call(&mut asm);
+                asm.shadow_ret();
                 asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::LibyoyoFree { slot } => {
-                asm.load_state(Reg::Rdi, *slot as u8);
+                // VirtualFree(lpAddress=state[slot], dwSize=0, dwFreeType=0x8000(MEM_RELEASE))
+                asm.load_state(Reg::Rcx, *slot as u8);
+                asm.mov_imm64(Reg::Rdx, 0);
+                asm.mov_imm64(Reg::R8, 0x8000);
+                asm.shadow_frame();
                 IatThunk::LibyoyoFree.emit_call(&mut asm);
+                asm.shadow_ret();
             }
             TirOp::LibyoyoOpen { slot, str_idx } => {
+                // CreateFileA(filename, GENERIC_READ=0x80000000, FILE_SHARE_READ=1, NULL,
+                //            OPEN_EXISTING=3, FILE_ATTRIBUTE_NORMAL=0x80, NULL)
                 let _ = str_idx;
-                emit_str_idx_addr(&mut asm);
+                emit_str_idx_addr(&mut asm); // lea rdi, [rip+path] — rdi needed for path ptr
+                asm.mov_rr(Reg::Rcx, Reg::Rdi);
+                asm.mov_imm64(Reg::Rdx, 0x8000_0000);
+                asm.mov_imm64(Reg::R8, 1);
+                asm.mov_imm64(Reg::R9, 0);
+                asm.sub_imm(Reg::Rsp, 0x38);
+                asm.mov_qword_rsp_disp(0x20, 3);
+                asm.mov_qword_rsp_disp(0x28, 0x80);
+                asm.mov_qword_rsp_disp(0x30, 0);
                 IatThunk::LibyoyoOpen.emit_call(&mut asm);
+                asm.add_imm(Reg::Rsp, 0x38);
                 asm.store_state(*slot as u8, Reg::Rax);
             }
             TirOp::LibyoyoRead { slot, fd, sz } => {
-                asm.load_state(Reg::Rdi, *fd as u8);
-                asm.load_state(Reg::Rsi, *slot as u8);
-                asm.mov_imm64(Reg::Rdx, *sz as u64);
+                // ReadFile(hFile=state[fd], lpBuffer=state[slot], nNumberOfBytesToRead=sz,
+                //          lpNumberOfBytesWritten=NULL, lpOverlapped=NULL)
+                asm.load_state(Reg::Rcx, *fd as u8);
+                asm.load_state(Reg::Rdx, *slot as u8);
+                asm.mov_imm64(Reg::R8, *sz as u64);
+                asm.mov_imm64(Reg::R9, 0);
+                asm.sub_imm(Reg::Rsp, 0x28);
+                asm.mov_qword_rsp_disp(0x20, 0);
                 IatThunk::LibyoyoRead.emit_call(&mut asm);
+                asm.add_imm(Reg::Rsp, 0x28);
                 asm.store_state((*slot + 1) as u8, Reg::Rax);
             }
             TirOp::LibyoyoWrite { fd, slot, sz } => {
-                asm.load_state(Reg::Rdi, *fd as u8);
-                asm.load_state(Reg::Rsi, *slot as u8);
-                asm.mov_imm64(Reg::Rdx, *sz as u64);
+                // WriteFile(hFile=state[fd], lpBuffer=state[slot], nNumberOfBytesToWrite=sz,
+                //           lpNumberOfBytesWritten=NULL, lpOverlapped=NULL)
+                asm.load_state(Reg::Rcx, *fd as u8);
+                asm.load_state(Reg::Rdx, *slot as u8);
+                asm.mov_imm64(Reg::R8, *sz as u64);
+                asm.mov_imm64(Reg::R9, 0);
+                asm.sub_imm(Reg::Rsp, 0x28);
+                asm.mov_qword_rsp_disp(0x20, 0);
                 IatThunk::LibyoyoWrite.emit_call(&mut asm);
+                asm.add_imm(Reg::Rsp, 0x28);
             }
             TirOp::LibyoyoClose { fd } => {
-                asm.load_state(Reg::Rdi, *fd as u8);
+                // CloseHandle(hObject=state[fd])
+                asm.load_state(Reg::Rcx, *fd as u8);
+                asm.shadow_frame();
                 IatThunk::LibyoyoClose.emit_call(&mut asm);
+                asm.shadow_ret();
             }
             TirOp::LibyoyoExit { slot } => {
-                asm.load_state(Reg::Rdi, *slot as u8);
+                // ExitProcess(uExitCode=state[slot])
+                asm.load_state(Reg::Rcx, *slot as u8);
                 IatThunk::LibyoyoExit.emit_call(&mut asm);
                 asm.ret();
             }
             TirOp::LibyoyoPrint { slot } => {
-                asm.load_state(Reg::Rdi, *slot as u8);
+                // Print: GetStdHandle(-11) then WriteFile — stub for now
+                asm.load_state(Reg::Rcx, *slot as u8);
                 IatThunk::LibyoyoPrint.emit_call(&mut asm);
             }
             TirOp::LibyoyoTime { slot } => {
+                // Time: GetSystemTimeAsFileTime — stub for now
                 IatThunk::LibyoyoTime.emit_call(&mut asm);
                 asm.store_state(*slot as u8, Reg::Rax);
             }
