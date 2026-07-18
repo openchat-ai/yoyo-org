@@ -39,15 +39,15 @@ pub const IAT_THUNK_NAMES: [&str; NUM_IAT_THUNKS] = [
     "ReadFile",
     "WriteFile",
     "CloseHandle",
-    "VirtualAlloc",              // libyoyo_alloc → kernel32
-    "VirtualFree",               // libyoyo_free  → kernel32
-    "CreateFileA",               // libyoyo_open  → kernel32
-    "ReadFile",                  // libyoyo_read  → kernel32
-    "WriteFile",                 // libyoyo_write → kernel32
-    "CloseHandle",               // libyoyo_close → kernel32
-    "ExitProcess",               // libyoyo_exit  → kernel32
-    "WriteFile",                 // libyoyo_print → kernel32
-    "GetSystemTimeAsFileTime",   // libyoyo_time  → kernel32
+    "VirtualAlloc",              // libyoyo_alloc   ?kernel32
+    "VirtualFree",               // libyoyo_free    ?kernel32
+    "CreateFileA",               // libyoyo_open    ?kernel32
+    "ReadFile",                  // libyoyo_read    ?kernel32
+    "WriteFile",                 // libyoyo_write   ?kernel32
+    "CloseHandle",               // libyoyo_close   ?kernel32
+    "ExitProcess",               // libyoyo_exit    ?kernel32
+    "WriteFile",                 // libyoyo_print   ?kernel32
+    "GetSystemTimeAsFileTime",   // libyoyo_time    ?kernel32
     "GetCommandLineA",
 ];
 
@@ -83,7 +83,7 @@ pub trait Platform: Debug {
     fn startup_blob(&self) -> Vec<u8>;
 }
 
-// ── Dispatch enum ───────────────────────────────────────────────────
+//        Dispatch enum                                                                                                                                                          
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlatformKind {
@@ -142,7 +142,7 @@ impl Platform for PlatformKind {
     }
 }
 
-// ── Stub Platform ───────────────────────────────────────────────────
+//        Stub Platform                                                                                                                                                          
 
 #[derive(Debug)]
 pub struct StubPlatform;
@@ -151,7 +151,7 @@ impl Platform for StubPlatform {
     fn name(&self) -> &'static str { "stub" }
 
     fn emit_alloc(&self, asm: &mut X64Assembler, _slot: u16, _sz: u64) -> IsaResult<()> {
-        // stub: set state[slot] = 0 (no real alloc) — rax must hold 0
+        // stub: set state[slot] = 0 (no real alloc)   ?rax must hold 0
         asm.store_state(_slot as u8, Reg::Rax);
         asm.store_state((_slot + 1) as u8, Reg::Rax);
         Ok(())
@@ -168,7 +168,7 @@ impl Platform for StubPlatform {
     fn startup_blob(&self) -> Vec<u8> { Vec::new() }
 }
 
-// ── libyoyo_* call emitters (Phase 4c) ───────────────────────────────
+//        libyoyo_* call emitters (Phase 4c)                                                                                              
 
 /// Place a placeholder for a libyoyo call fixup, return offset of the rel32
 pub fn emit_libyoyo_call_marker(asm: &mut X64Assembler) -> u32 {
@@ -177,7 +177,7 @@ pub fn emit_libyoyo_call_marker(asm: &mut X64Assembler) -> u32 {
     off
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+//        Helpers                                                                                                                                                                            
 
 /// Emit `FF 15 ii 00 00 00` into `asm`: call [rip+ii].
 /// The linker patches bytes 2..6 with the correct RIP-relative displacement.
@@ -185,19 +185,19 @@ pub fn call_iat_thunk(asm: &mut X64Assembler, api: Win32Api) {
     asm.call_iat_thunk(api as u8);
 }
 
-/// Public version — emit libyoyo call thunk into an assembler.
+/// Public version   ?emit libyoyo call thunk into an assembler.
 impl Win32Api {
     pub fn emit_call(&self, asm: &mut X64Assembler) {
         asm.call_iat_thunk(*self as u8);
     }
 }
 
-/// Emit `lea rdi, [rip+str_offset_placeholder]` — load address of str_idx string.
+/// Emit `lea rdi, [rip+str_offset_placeholder]`   ?load address of str_idx string.
 pub fn emit_str_idx_addr(asm: &mut X64Assembler) {
     asm.lea_rdi_rip_placeholder();
 }
 
-// ── Win32 Platform ──────────────────────────────────────────────────
+//        Win32 Platform                                                                                                                                                       
 
 #[derive(Debug)]
 pub struct Win32Platform;
@@ -226,7 +226,7 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 1);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 3);
-        // sub rsp must be 16-byte aligned: 0x20 shadow + 3×8 args = 0x38 → 0x40
+        // sub rsp must be 16-byte aligned: 0x20 shadow + 3  8 args = 0x38   ?0x40
         asm.sub_imm(Reg::Rsp, 0x40);
         asm.mov_qword_rsp_disp(0x20, 3);   // 5th: dwCreationDisposition = OPEN_EXISTING
         asm.mov_qword_rsp_disp(0x28, 0x80); // 6th: dwFlagsAndAttributes = FILE_ATTRIBUTE_NORMAL
@@ -253,7 +253,7 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::R8, Reg::R13);
         asm.mov_imm64(Reg::R9, 0);
         // 4 args in regs + lpNumberOfBytesRead on stack = shadow + 1 slot
-        // 0x20 shadow + 1×8 = 0x28; round up to 0x30 for 16-byte alignment
+        // 0x20 shadow + 1  8 = 0x28; round up to 0x30 for 16-byte alignment
         asm.sub_imm(Reg::Rsp, 0x30);
         asm.lea_rsp_sib32(Reg::R9, 0x28);   // R9 = &bytesRead slot
         asm.mov_qword_rsp_disp(0x28, 0);    // bytesRead slot
@@ -283,7 +283,7 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 0);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 2);
-        // sub rsp must be 16-byte aligned: 0x20 shadow + 3×8 args = 0x38 → 0x40
+        // sub rsp must be 16-byte aligned: 0x20 shadow + 3  8 args = 0x38   ?0x40
         asm.sub_imm(Reg::Rsp, 0x40);
         asm.mov_qword_rsp_disp(0x20, 2);  // 5th: dwCreationDisposition = CREATE_ALWAYS
         asm.mov_qword_rsp_disp(0x28, 0);  // 6th: dwFlagsAndAttributes
@@ -295,7 +295,7 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::Rdx, Reg::R13);
         asm.mov_rr(Reg::R8, Reg::R14);
         // 4 args in regs + lpNumberOfBytesWritten on stack = shadow + 1 slot
-        // 0x20 shadow + 1×8 = 0x28; round up to 0x30 for 16-byte alignment
+        // 0x20 shadow + 1  8 = 0x28; round up to 0x30 for 16-byte alignment
         asm.sub_imm(Reg::Rsp, 0x30);
         asm.lea_rsp_sib32(Reg::R9, 0x28);   // R9 = &bytesWritten slot
         asm.mov_qword_rsp_disp(0x28, 0);    // bytesWritten slot
@@ -313,11 +313,14 @@ impl Platform for Win32Platform {
     }
 
     fn startup_blob(&self) -> Vec<u8> {
-        // Win32 startup: set up stack state area, call H_00, clean up and return.
-        // Registers saved per x64 calling convention (r12-r15, rbx, rsi are callee-saved).
-        // r15 = stack-based state area pointer (lea r15, [rsp+0x808]).
+        // Win32 startup: set up stack state area, call H_00, then ExitProcess.
+        // Critical: we MUST call ExitProcess rather than ret. When the
+        // entry function just 'ret's, the kernel wraps things in NtWait
+        // on inherited CONIN$/CONOUT$ handles (= 0x400) and the process
+        // hangs forever waiting for them to close (parent never closes).
         //
-        // Layout: push 6 regs, sub rsp, lea r15, call H_00, add rsp, pop 6 regs, ret
+        // Layout: push 6 regs, sub rsp, lea r15, call H_00, pop 6 regs,
+        //         add rsp, call ExitProcess(R8 = exit code), hlt
         let mut a = X64Assembler::new();
         a.push(Reg::R12);
         a.push(Reg::R13);
@@ -327,7 +330,7 @@ impl Platform for Win32Platform {
         a.push(Reg::Rsi);
         a.sub_imm(Reg::Rsp, 0x1008);
         a.lea_rsp_sib32(Reg::R15, 0x808);
-        a.call_rel32_placeholder(); // → H_00 (patched by pe_link)
+        a.call_rel32_placeholder(); // -> H_00 (patched by pe_link)
         a.add_imm(Reg::Rsp, 0x1008);
         a.pop(Reg::Rsi);
         a.pop(Reg::R15);
@@ -335,7 +338,11 @@ impl Platform for Win32Platform {
         a.pop(Reg::R14);
         a.pop(Reg::R13);
         a.pop(Reg::R12);
-        a.ret();
+        // H_00's return value is already in RAX (typically CloseHandle's
+        // success/failure). Pass as ExitProcess's uExitCode.
+        a.mov_rr(Reg::Rcx, Reg::Rax);
+        a.call_iat_thunk(Win32Api::LibyoyoExit as u8);
+        a.ret(); // unreachable; ExitProcess never returns
         a.into_bytes()
     }
 
@@ -343,11 +350,23 @@ impl Platform for Win32Platform {
     /// copies its contents to "output.exe". Mirrors the legacy yoy0 v0.4
     /// main(): argv parsing is skipped, both paths are constants.
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
-        // Step F: + emit_writefile(R13=argv[2], RDX=buf, R8=size)
+        // H_00 entry handler: argv-mode LoadFile(argv[1]) + WriteFile(argv[2]).
+        //   gen2.exe <input.ty> <output.exe>
+        //
+        // Full pipeline:
+        //   1. GetCommandLineA -> RAX (PSTR to full cmdline)
+        //   2. Copy cmdline to local stack buffer at [RSP+0x100]
+        //   3. Scan + null-terminate argv[0] at first space, argv[1] at second
+        //   4. R12 = argv[1] (input.ty), R13 = argv[2] (output.exe)
+        //   5. emit_loadfile(RSI=R12) -> RAX=buf, RDX=size
+        //   6. emit_writefile(RSI=R13, RDX=buf, R8=size) -> output.exe
+        //   7. H_00's RAX = exit code. RAX has CloseHandle's success value.
+        //      Startup_blob copies RAX into RCX and calls ExitProcess(RCX).
+
         asm.sub_imm(Reg::Rsp, 0x20);
         asm.call_iat_thunk(Win32Api::GetCommandLineA as u8);
         asm.add_imm(Reg::Rsp, 0x20);
-        asm.mov_rr(Reg::R14, Reg::Rax);
+        asm.mov_rr(Reg::R14, Reg::Rax); // R14 = cmdline src
 
         asm.push(Reg::R12);
         asm.push(Reg::R13);
@@ -358,6 +377,7 @@ impl Platform for Win32Platform {
         asm.sub_imm(Reg::Rsp, 0x1008);
         asm.lea_rsp_sib32(Reg::R15, 0x808);
 
+        // copy_loop: cmdline -> [RSP+0x100]
         asm.mov_rr(Reg::Rsi, Reg::R14);
         asm.lea_rsp_sib32(Reg::Rdi, 0x100);
         let copy_loop = asm.alloc_label();
@@ -372,6 +392,7 @@ impl Platform for Win32Platform {
         asm.jmp_rel8_label(copy_loop);
         asm.set_label(copy_done);
 
+        // scan0: skip argv[0]
         asm.lea_rsp_sib32(Reg::Rsi, 0x100);
         let scan0 = asm.alloc_label();
         let space0 = asm.alloc_label();
@@ -385,6 +406,7 @@ impl Platform for Win32Platform {
         asm.inc(Reg::Rsi);
         asm.mov_rr(Reg::R12, Reg::Rsi);
 
+        // scan1: skip argv[1]
         let scan1 = asm.alloc_label();
         let space1 = asm.alloc_label();
         asm.set_label(scan1);
@@ -397,11 +419,11 @@ impl Platform for Win32Platform {
         asm.inc(Reg::Rsi);
         asm.mov_rr(Reg::R13, Reg::Rsi);
 
-        // emit_loadfile(R12=argv[1]) → RAX=buf, RDX=size
+        // emit_loadfile(R12=argv[1])
         asm.mov_rr(Reg::Rsi, Reg::R12);
         self.emit_loadfile(asm, 0, 0)?;
 
-        // emit_writefile(R13=argv[2], RDX=buf, R8=size)
+        // emit_writefile(R13=argv[2])
         // emit_loadfile pushed R12-R14 internally, so R13 still = argv[2].
         asm.mov_rr(Reg::R12, Reg::Rax); // R12 = buf (clobbers argv[1])
         asm.mov_rr(Reg::R8, Reg::Rdx);  // R8 = size
@@ -409,6 +431,7 @@ impl Platform for Win32Platform {
         asm.mov_rr(Reg::Rsi, Reg::R13); // RSI = argv[2]
         self.emit_writefile(asm, 0, 0, 0)?;
 
+        // epilogue (frame teardown). ExitProcess is called by startup_blob.
         asm.add_imm(Reg::Rsp, 0x1008);
         asm.pop(Reg::Rsi);
         asm.pop(Reg::R15);
@@ -423,7 +446,7 @@ impl Platform for Win32Platform {
     }
 }
 
-// ── Linux Platform ──────────────────────────────────────────────────
+//        Linux Platform                                                                                                                                                       
 #[derive(Debug)]
 pub struct LinuxPlatform;
 
@@ -492,11 +515,11 @@ impl Platform for LinuxPlatform {
 
     fn startup_blob(&self) -> Vec<u8> {
         // Linux startup: set up stack state area, then jmp to H_00.
-        // ELF entry point — no return address, H_00 exits via syscall.
+        // ELF entry point   ?no return address, H_00 exits via syscall.
         let mut a = X64Assembler::new();
         a.sub_imm(Reg::Rsp, 0x1008);
         a.lea_rsp_sib32(Reg::R15, 0x808);
-        a.jmp_rel32_placeholder(); // → H_00 (patched by pe_link)
+        a.jmp_rel32_placeholder(); //   ?H_00 (patched by pe_link)
         a.into_bytes()
     }
 

@@ -479,8 +479,9 @@ fn unique_apis(fixups: &[(u32, Win32Api)]) -> Vec<Win32Api> {
     let mut result = Vec::new();
     for &(_, api) in fixups {
         // Skip libyoyo_* APIs: they live in libyoyo.dll which we don't bundle.
-        // (Patched calls will fail at runtime, but kernel32.dll imports resolve.)
-        if api as u8 >= 6 && api as u8 <= 14 {
+        // EXCEPTION: LibyoyoExit (12) maps to kernel32!ExitProcess, which we DO
+        // bundle. So include it specifically.
+        if api as u8 >= 6 && api as u8 <= 14 && api != Win32Api::LibyoyoExit {
             continue;
         }
         let idx = api as usize;
