@@ -27,6 +27,7 @@ mod types;
 mod assembler;
 mod isa;
 mod fixup;
+mod executor;
 mod platform;
 mod ddc;
 mod chain_log;

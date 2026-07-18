@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use crate::assembler::X64Assembler;
+use crate::executor;
 use crate::types::{IsaResult, Reg};
 
 /// IAT thunk indices embedded in `FF 15 ii 00 00 00` placeholders.
@@ -350,23 +351,7 @@ impl Platform for Win32Platform {
     /// copies its contents to "output.exe". Mirrors the legacy yoy0 v0.4
     /// main(): argv parsing is skipped, both paths are constants.
     fn emit_h00_code(&self, asm: &mut X64Assembler) -> IsaResult<()> {
-        // H_00 entry handler: argv-mode LoadFile(argv[1]) + WriteFile(argv[2]).
-        //   gen2.exe <input.ty> <output.exe>
-        //
-        // Full pipeline:
-        //   1. GetCommandLineA -> RAX (PSTR to full cmdline)
-        //   2. Copy cmdline to local stack buffer at [RSP+0x100]
-        //   3. Scan + null-terminate argv[0] at first space, argv[1] at second
-        //   4. R12 = argv[1] (input.ty), R13 = argv[2] (output.exe)
-        //   5. emit_loadfile(RSI=R12) -> RAX=buf, RDX=size
-        //   6. emit_writefile(RSI=R13, RDX=buf, R8=size) -> output.exe
-        //   7. H_00's RAX = exit code. RAX has CloseHandle's success value.
-        //      Startup_blob copies RAX into RCX and calls ExitProcess(RCX).
-
-        asm.sub_imm(Reg::Rsp, 0x20);
-        asm.call_iat_thunk(Win32Api::GetCommandLineA as u8);
-        asm.add_imm(Reg::Rsp, 0x20);
-        asm.mov_rr(Reg::R14, Reg::Rax); // R14 = cmdline src
+        // V4: Simplified pipeline — hardcoded "input.ky" and "output.exe" on stack.
 
         asm.push(Reg::R12);
         asm.push(Reg::R13);
@@ -374,79 +359,52 @@ impl Platform for Win32Platform {
         asm.push(Reg::Rbx);
         asm.push(Reg::R15);
         asm.push(Reg::Rsi);
-        asm.sub_imm(Reg::Rsp, 0x1008);
-        asm.lea_rsp_sib32(Reg::R15, 0x808);
+        asm.sub_imm(Reg::Rsp, 0x1020); // stack buffer + slack for I/O sub-frames
 
-        // copy_loop: cmdline -> [RSP+0x100]
-        asm.mov_rr(Reg::Rsi, Reg::R14);
-        asm.lea_rsp_sib32(Reg::Rdi, 0x100);
-        let copy_loop = asm.alloc_label();
-        let copy_done = asm.alloc_label();
-        asm.set_label(copy_loop);
-        asm.mov_reg_byte_mem(Reg::Rax, Reg::Rsi);
-        asm.mov_byte_mem_reg(Reg::Rdi, Reg::Rax);
-        asm.test_r8_r8(Reg::Rax, Reg::Rax);
-        asm.jcc_rel8_label(4, copy_done);
-        asm.inc(Reg::Rsi);
-        asm.inc(Reg::Rdi);
-        asm.jmp_rel8_label(copy_loop);
-        asm.set_label(copy_done);
+        // Write "input.ky\0" at [RSP+0x1000]
+        asm.lea_rsp_sib32(Reg::Rdi, 0x1000);
+        for &b in b"input.ky" {
+            asm.mov_byte_mem_imm(Reg::Rdi, b); asm.inc(Reg::Rdi);
+        }
+        asm.mov_byte_mem_imm(Reg::Rdi, 0);
+        asm.lea_rsp_sib32(Reg::R12, 0x1000); // R12 = "input.ky"
 
-        // scan0: skip argv[0]
-        asm.lea_rsp_sib32(Reg::Rsi, 0x100);
-        let scan0 = asm.alloc_label();
-        let space0 = asm.alloc_label();
-        asm.set_label(scan0);
-        asm.cmp_byte_mem_imm(Reg::Rsi, 0x20);
-        asm.jcc_rel8_label(4, space0);
-        asm.inc(Reg::Rsi);
-        asm.jmp_rel8_label(scan0);
-        asm.set_label(space0);
-        asm.mov_byte_mem_imm(Reg::Rsi, 0);
-        asm.inc(Reg::Rsi);
-        asm.mov_rr(Reg::R12, Reg::Rsi);
+        // Write "output.exe\0" at [RSP+0x1010]
+        asm.lea_rsp_sib32(Reg::Rdi, 0x1010);
+        for &b in b"output.exe" {
+            asm.mov_byte_mem_imm(Reg::Rdi, b); asm.inc(Reg::Rdi);
+        }
+        asm.mov_byte_mem_imm(Reg::Rdi, 0);
+        asm.lea_rsp_sib32(Reg::R13, 0x1010); // R13 = "output.exe"
 
-        // scan1: skip argv[1]
-        let scan1 = asm.alloc_label();
-        let space1 = asm.alloc_label();
-        asm.set_label(scan1);
-        asm.cmp_byte_mem_imm(Reg::Rsi, 0x20);
-        asm.jcc_rel8_label(4, space1);
-        asm.inc(Reg::Rsi);
-        asm.jmp_rel8_label(scan1);
-        asm.set_label(space1);
-        asm.mov_byte_mem_imm(Reg::Rsi, 0);
-        asm.inc(Reg::Rsi);
-        asm.mov_rr(Reg::R13, Reg::Rsi);
-
-        // emit_loadfile(R12=argv[1])
+        // Pipeline: loadfile + V3 executor + writefile
         asm.mov_rr(Reg::Rsi, Reg::R12);
         self.emit_loadfile(asm, 0, 0)?;
 
-        // emit_writefile(R13=argv[2])
-        // emit_loadfile pushed R12-R14 internally, so R13 still = argv[2].
-        asm.mov_rr(Reg::R12, Reg::Rax); // R12 = buf (clobbers argv[1])
-        asm.mov_rr(Reg::R8, Reg::Rdx);  // R8 = size
-        asm.mov_rr(Reg::Rdx, Reg::R12); // RDX = buf
-        asm.mov_rr(Reg::Rsi, Reg::R13); // RSI = argv[2]
+        // V3 executor: R12=buf, RDX=size
+        asm.mov_rr(Reg::R12, Reg::Rax);
+        executor::emit_v3_executor(asm)?;
+
+        // Write output: RAX=output_size, RDX=output_buf, R13=output filename
+        asm.mov_rr(Reg::R8, Reg::Rax);
+        asm.mov_rr(Reg::Rsi, Reg::R13);
         self.emit_writefile(asm, 0, 0, 0)?;
 
-        // epilogue (frame teardown). ExitProcess is called by startup_blob.
-        asm.add_imm(Reg::Rsp, 0x1008);
+        // epilogue
+        asm.add_imm(Reg::Rsp, 0x1020);
         asm.pop(Reg::Rsi);
         asm.pop(Reg::R15);
         asm.pop(Reg::Rbx);
         asm.pop(Reg::R14);
         asm.pop(Reg::R13);
         asm.pop(Reg::R12);
-
         asm.resolve_fixups();
         asm.ret();
         Ok(())
     }
 }
 
-//        Linux Platform                                                                                                                                                       
+//        Linux Platform
 #[derive(Debug)]
 pub struct LinuxPlatform;
 

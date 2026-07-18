@@ -2,6 +2,13 @@ use crate::types::Reg;
 
 const STATE_BASE: Reg = Reg::R15;
 
+/// Fixup entry for rel32 (4-byte displacement) jumps/calls to labels.
+struct Fixup32 {
+    /// Byte offset of the rel32 field (last 4 bytes of instruction).
+    rel32_off: usize,
+    label_id: usize,
+}
+
 /// Type-safe x64 assembler.
 ///
 /// No `Result`, no `FixedBuf`, no const generics. Just a `Vec<u8>` under the hood.
@@ -10,11 +17,12 @@ pub struct X64Assembler {
     pub bytes: Vec<u8>,
     labels: Vec<usize>,
     fixups: Vec<(usize, usize)>,
+    fixups32: Vec<Fixup32>,
 }
 
 impl X64Assembler {
     pub fn new() -> Self {
-        Self { bytes: Vec::new(), labels: Vec::new(), fixups: Vec::new() }
+        Self { bytes: Vec::new(), labels: Vec::new(), fixups: Vec::new(), fixups32: Vec::new() }
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
@@ -61,30 +69,75 @@ impl X64Assembler {
         self.labels[id] = self.bytes.len();
     }
 
-    /// Emit `EB 00` (placeholder) and record a fixup from here to `label`.
-    pub fn jmp_rel8_label(&mut self, label: usize) {
-        let fixup_offset = self.bytes.len();
-        self.emit_u8(0xEB);
-        self.emit_u8(0);
-        self.fixups.push((fixup_offset, label));
+    /// Get the byte offset of a label (must have been allocated and set).
+    pub fn get_label_offset(&self, id: usize) -> usize {
+        self.labels[id]
     }
 
-    /// Emit `7x 00` (placeholder) and record a fixup from here to `label`.
+    /// Emit `E9 00 00 00 00` (rel32 placeholder) and record a fixup.
+    /// Always uses rel32 form to avoid distance overflow issues.
+    pub fn jmp_rel8_label(&mut self, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0xE9);
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 1, label_id: label });
+    }
+
+    /// Emit `0F 8x 00 00 00 00` (rel32 placeholder) and record a fixup.
+    /// Always uses rel32 form to avoid distance overflow issues.
     pub fn jcc_rel8_label(&mut self, cc: u8, label: usize) {
-        let fixup_offset = self.bytes.len();
-        self.emit_u8(0x70 | (cc & 0x0F));
-        self.emit_u8(0);
-        self.fixups.push((fixup_offset, label));
+        let off = self.bytes.len();
+        self.emit_u8(0x0F);
+        self.emit_u8(0x80 | (cc & 0x0F));
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 2, label_id: label });
     }
 
     /// Resolve all fixups: compute disp = label_pos - (fixup_offset + 2).
     /// Must be called after all labels and instructions are emitted.
     pub fn resolve_fixups(&mut self) {
+        // rel8 fixups
         for &(fixup_offset, label_id) in &self.fixups {
             let label_pos = self.labels[label_id];
             let disp = label_pos as i32 - (fixup_offset as i32 + 2);
             self.bytes[fixup_offset + 1] = disp as u8;
         }
+        // rel32 fixups
+        for fixup in &self.fixups32 {
+            let label_pos = self.labels[fixup.label_id] as i32;
+            let rel32_off = fixup.rel32_off as i32;
+            // disp = target - (instruction_end), where instruction_end = rel32_off + 4
+            // because rel32 is stored at the 4 bytes starting at rel32_off.
+            let disp = label_pos - (rel32_off + 4);
+            self.bytes[fixup.rel32_off..fixup.rel32_off + 4].copy_from_slice(&disp.to_le_bytes());
+        }
+    }
+
+    // ── rel32 label fixup methods (for CALL/JMP/JCC with 4-byte displacement) ──
+
+    /// `E8 rel32` — call to label, patched via fixups32
+    pub fn call_rel32_label(&mut self, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0xE8);
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 1, label_id: label });
+    }
+
+    /// `E9 rel32` — jmp to label, patched via fixups32
+    pub fn jmp_rel32_label(&mut self, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0xE9);
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 1, label_id: label });
+    }
+
+    /// `0F 8x rel32` — jcc to label, patched via fixups32
+    pub fn jcc_rel32_label(&mut self, cc: u8, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0x0F);
+        self.emit_u8(0x80 | (cc & 0x0F));
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 2, label_id: label });
     }
 
     // ── Private helpers ──
@@ -374,32 +427,69 @@ impl X64Assembler {
 
     /// `mov byte [base], val` (e.g. mov byte [rsi], al = 88 06)
     pub fn mov_byte_mem_reg(&mut self, base: Reg, val: Reg) {
-        // REX-free for low8 registers: 0x88 + ModRM
+        let need_rex = base.rex_b() || val.rex_r();
+        if need_rex {
+            self.emit_u8(0x40 | (if val.rex_r() { 4 } else { 0 }) | (if base.rex_b() { 1 } else { 0 }));
+        }
         self.emit_u8(0x88);
-        self.emit_modrm(0, val.low3(), base.low3());
-        self.maybe_emit_sib(base);
+        if base.low3() == 5 {
+            self.emit_modrm(1, val.low3(), base.low3());
+            self.maybe_emit_sib(base);
+            self.emit_u8(0);
+        } else {
+            self.emit_modrm(0, val.low3(), base.low3());
+            self.maybe_emit_sib(base);
+        }
     }
 
     /// `mov reg, byte [base]` (e.g. mov al, [rsi] = 8A 06)
     pub fn mov_reg_byte_mem(&mut self, dst: Reg, base: Reg) {
+        let need_rex = base.rex_b() || dst.rex_r();
+        if need_rex {
+            self.emit_u8(0x40 | (if dst.rex_r() { 4 } else { 0 }) | (if base.rex_b() { 1 } else { 0 }));
+        }
         self.emit_u8(0x8A);
-        self.emit_modrm(0, dst.low3(), base.low3());
-        self.maybe_emit_sib(base);
+        if base.low3() == 5 {
+            self.emit_modrm(1, dst.low3(), base.low3());
+            self.maybe_emit_sib(base);
+            self.emit_u8(0);
+        } else {
+            self.emit_modrm(0, dst.low3(), base.low3());
+            self.maybe_emit_sib(base);
+        }
     }
 
     /// `mov byte [base], imm8` (e.g. C6 06 00 = mov byte [rsi], 0)
     pub fn mov_byte_mem_imm(&mut self, base: Reg, imm: u8) {
+        if base.rex_b() {
+            self.emit_u8(0x41);
+        }
         self.emit_u8(0xC6);
-        self.emit_modrm(0, 0, base.low3());
-        self.maybe_emit_sib(base);
+        if base.low3() == 5 {
+            self.emit_modrm(1, 0, base.low3());
+            self.maybe_emit_sib(base);
+            self.emit_u8(0);
+        } else {
+            self.emit_modrm(0, 0, base.low3());
+            self.maybe_emit_sib(base);
+        }
         self.emit_u8(imm);
     }
 
     /// `cmp byte [base], imm8` (e.g. 80 3E 20 = cmp byte [rsi], 0x20)
     pub fn cmp_byte_mem_imm(&mut self, base: Reg, imm: u8) {
+        if base.rex_b() {
+            self.emit_u8(0x41);
+        }
         self.emit_u8(0x80);
-        self.emit_modrm(0, 7, base.low3());
-        self.maybe_emit_sib(base);
+        if base.low3() == 5 {
+            self.emit_modrm(1, 7, base.low3());
+            self.maybe_emit_sib(base);
+            self.emit_u8(0);
+        } else {
+            self.emit_modrm(0, 7, base.low3());
+            self.maybe_emit_sib(base);
+        }
         self.emit_u8(imm);
     }
 
@@ -407,6 +497,10 @@ impl X64Assembler {
 
     /// `test reg, reg` (byte, e.g. test al, al = 84 C0)
     pub fn test_r8_r8(&mut self, r1: Reg, r2: Reg) {
+        let need_rex = r1.rex_b() || r2.rex_r();
+        if need_rex {
+            self.emit_u8(0x40 | (if r2.rex_r() { 4 } else { 0 }) | (if r1.rex_b() { 1 } else { 0 }));
+        }
         self.emit_u8(0x84);
         self.emit_modrm(3, r2.low3(), r1.low3());
     }
@@ -444,6 +538,121 @@ impl X64Assembler {
     pub fn jcc_rel8(&mut self, cc: u8, disp: i8) {
         self.emit_u8(0x70 | (cc & 0x0F));
         self.emit_u8(disp as u8);
+    }
+
+    // ── New primitives for V3 executor ──
+
+    /// `stosb` — store AL at [RDI], increment RDI (AA, 1 byte)
+    pub fn stosb(&mut self) {
+        self.emit_u8(0xAA);
+    }
+
+    /// `stosd` — store EAX at [RDI], increment RDI by 4 (AB, 1 byte)
+    pub fn stosd(&mut self) {
+        self.emit_u8(0xAB);
+    }
+
+    /// `xlatb` — mov al, [rbx + al] (D7, 1 byte)
+    /// `xlatb` replacement: `al = [rbx + al]` using movzx instead of D7.
+    /// Original D7 was removed on AMD Zen 3+ → illegal instruction.
+/// Equivalent: movzx eax,al; movzx rax,byte[rbx+rax]; AL = lookup result
+    /// ModRM=0x04 (mod=00, reg=000=RAX, rm=SIB); SIB=0x03 (scale=1, idx=RAX, base=RBX)
+    pub fn xlatb(&mut self) {
+        self.emit_u8(0x0F); self.emit_u8(0xB6); self.emit_u8(0xC0); // movzx eax, al (3B)
+        self.emit_u8(0x48); self.emit_u8(0x0F); self.emit_u8(0xB6); // movzx rax, byte [rbx+rax] (5B)
+        self.emit_u8(0x04); self.emit_u8(0x03);
+    }
+
+    /// `lea rbx, [rip + disp32]` (48 8D 1D disp32, 7 bytes)
+    pub fn lea_rbx_rip(&mut self, disp: i32) {
+        self.emit_u8(0x48);
+        self.emit_u8(0x8D);
+        self.emit_u8(0x1D);
+        self.emit_i32(disp);
+    }
+
+    /// `mov al, imm8` (B0 imm8, 2 bytes)
+    pub fn mov_al_imm8(&mut self, imm: u8) {
+        self.emit_u8(0xB0);
+        self.emit_u8(imm);
+    }
+
+    /// `mov eax, imm32` (B8 imm32, 5 bytes, 32-bit — clears upper 32 bits of RAX)
+    pub fn mov_eax_imm32(&mut self, imm: u32) {
+        self.emit_u8(0xB8);
+        self.emit_u32(imm);
+    }
+
+    /// `cmp al, imm8` (3C imm8, 2 bytes)
+    pub fn cmp_al_imm8(&mut self, imm: u8) {
+        self.emit_u8(0x3C);
+        self.emit_u8(imm);
+    }
+
+    /// `shl al, imm8` (C0 E0 imm8, 3 bytes)
+    pub fn shl_al_imm8(&mut self, imm: u8) {
+        self.emit_u8(0xC0);
+        self.emit_u8(0xE0);
+        self.emit_u8(imm);
+    }
+
+    /// `or al, cl` (08 C8, 2 bytes)
+    pub fn or_al_cl(&mut self) {
+        self.emit_u8(0x08);
+        self.emit_u8(0xC8);
+    }
+
+    /// `stc` (F9, 1 byte)
+    pub fn stc(&mut self) {
+        self.emit_u8(0xF9);
+    }
+
+    /// `clc` (F8, 1 byte)
+    pub fn clc(&mut self) {
+        self.emit_u8(0xF8);
+    }
+
+    /// `movzx ecx, al` (0F B6 C8, 3 bytes — zero-extend AL to ECX)
+    pub fn movzx_ecx_al(&mut self) {
+        self.emit_u8(0x0F);
+        self.emit_u8(0xB6);
+        self.emit_u8(0xC8);
+    }
+
+    /// `mov dword [rdi], eax` (89 07, 2 bytes)
+    pub fn mov_dword_rdi_eax(&mut self) {
+        self.emit_u8(0x89);
+        self.emit_u8(0x07);
+    }
+
+    /// `add rdi, imm` (auto s8/s32)
+    pub fn add_rdi_imm(&mut self, imm: i32) {
+        let rm = Reg::Rdi.low3();
+        self.emit_rex(true, false, false, false);
+        if imm >= -128 && imm <= 127 {
+            self.emit_u8(0x83);
+            self.emit_modrm(3, 0, rm);
+            self.emit_u8(imm as u8);
+        } else {
+            self.emit_u8(0x81);
+            self.emit_modrm(3, 0, rm);
+            self.emit_i32(imm);
+        }
+    }
+
+    /// `mov byte [rdi], imm8` (C6 07 imm8, 3 bytes)
+    pub fn mov_byte_rdi_imm8(&mut self, imm: u8) {
+        self.emit_u8(0xC6);
+        self.emit_u8(0x07);
+        self.emit_u8(imm);
+    }
+
+    /// `sub rdi, r14` — compute current_output_offset = RDI - R14
+    pub fn sub_rdi_r14(&mut self) {
+        // 4C 29 F7
+        self.emit_u8(0x4C);
+        self.emit_u8(0x29);
+        self.emit_modrm(3, Reg::R14.low3(), Reg::Rdi.low3());
     }
 
     // ── Special patterns ──
@@ -532,6 +741,25 @@ impl X64Assembler {
         // SIB: scale=0, index=100(none), base=100(rsp)
         self.emit_u8(0x24);
         self.emit_u32(disp);
+    }
+
+    /// `mov [r14 + reg*4], eax` — store dword to handler_offsets table (SIB: 41 89 04 8E)
+    pub fn store_handler_offset(&mut self, reg: Reg) {
+        // 41 89 04 8E: REX.B=1 (r14 base), opcode=0x89, ModRM=0x04(SIB), SIB=scale=10(index*4)+index+base=110(r14)
+        let sib = (2 << 6) | ((reg.low3() as u8) << 3) | (Reg::R14.low3() as u8);
+        self.emit_u8(0x41);  // REX.B
+        self.emit_u8(0x89);  // MOV r/m32, r32
+        self.emit_u8(0x04);  // ModRM: mod=00, reg=000(eax), rm=100(SIB)
+        self.emit_u8(sib);
+    }
+
+    /// `mov eax, [r14 + reg*4]` — load dword from handler_offsets table (SIB: 41 8B 04 8E)
+    pub fn load_handler_offset(&mut self, reg: Reg) {
+        let sib = (2 << 6) | ((reg.low3() as u8) << 3) | (Reg::R14.low3() as u8);
+        self.emit_u8(0x41);  // REX.B
+        self.emit_u8(0x8B);  // MOV r32, r/m32
+        self.emit_u8(0x04);  // ModRM: mod=00, reg=000(eax), rm=100(SIB)
+        self.emit_u8(sib);
     }
 
     /// `mov rsi, [rdi]` — load from pointer
@@ -1106,14 +1334,14 @@ mod tests {
     fn test_shadow_frame() {
         let mut asm = X64Assembler::new();
         asm.shadow_frame();
-        assert_eq!(asm.as_slice(), &[0x48, 0x83, 0xEC, 0x28]);
+        assert_eq!(asm.as_slice(), &[0x48, 0x83, 0xEC, 0x20]);
     }
 
     #[test]
     fn test_shadow_ret() {
         let mut asm = X64Assembler::new();
         asm.shadow_ret();
-        assert_eq!(asm.as_slice(), &[0x48, 0x83, 0xC4, 0x28]);
+        assert_eq!(asm.as_slice(), &[0x48, 0x83, 0xC4, 0x20]);
     }
 
     #[test]
@@ -1193,8 +1421,8 @@ mod tests {
     fn test_load_mem_r13_r12_disp32() {
         let mut asm = X64Assembler::new();
         asm.load_mem(Reg::R13, Reg::R12, 0x1000);
-        // REX.WB = 0x4D, 0x8B, ModRM mod=10 reg=101 rm=100 = 0xAC, disp32 0x1000
-        assert_eq!(asm.as_slice(), &[0x4D, 0x8B, 0xAC, 0x00, 0x10, 0x00, 0x00]);
+        // REX.WB = 0x4D, 0x8B, ModRM mod=10 reg=101 rm=100=SIB, SIB=0x24=[RSP], disp32 0x1000
+        assert_eq!(asm.as_slice(), &[0x4D, 0x8B, 0xAC, 0x24, 0x00, 0x10, 0x00, 0x00]);
     }
 
     #[test]
@@ -1254,20 +1482,20 @@ mod tests {
         a.emit_u8(0xAA);           // pos 0
         a.emit_u8(0xBB);           // pos 1
         let done = a.alloc_label();
-        a.jcc_rel8_label(4, done); // jz .done: pos 2 → disp forwards
-        a.emit_u8(0xCC);           // pos 4
-        a.jmp_rel8_label(loop_start); // jmp back to .loop_start: pos 5 → disp = 0-7 = -7 = 0xF9
-        a.set_label(done);         // pos 7
-        a.emit_u8(0xDD);           // pos 7
+        a.jcc_rel8_label(4, done); // jz .done: now rel32 (6B)
+        a.emit_u8(0xCC);           // pos 8
+        a.jmp_rel8_label(loop_start); // jmp back to .loop_start: now rel32 (5B)
+        a.set_label(done);         // pos 14
+        a.emit_u8(0xDD);           // pos 14
         a.resolve_fixups();
         // Expected:
         //   pos 0: AA
         //   pos 1: BB
-        //   pos 2: 74 04  (jz .done at pos 7 → disp = 7-4=3)
-        //   pos 4: CC
-        //   pos 5: EB F9  (jmp .loop_start at pos 0 → disp = 0-7=-7=0xF9)
-        //   pos 7: DD
-        assert_eq!(a.as_slice(), &[0xAA, 0xBB, 0x74, 0x03, 0xCC, 0xEB, 0xF9, 0xDD]);
+        //   pos 2: 0F 84 06 00 00 00  (jz .done at pos 14: disp = 14 - 8 = 6)
+        //   pos 8: CC
+        //   pos 9: E9 F2 FF FF FF     (jmp .loop_start at pos 0: disp = 0 - 14 = -14)
+        //   pos 14: DD
+        assert_eq!(a.as_slice(), &[0xAA, 0xBB, 0x0F, 0x84, 0x06, 0x00, 0x00, 0x00, 0xCC, 0xE9, 0xF2, 0xFF, 0xFF, 0xFF, 0xDD]);
     }
 
     #[test]
@@ -1276,20 +1504,20 @@ mod tests {
         let skip1 = a.alloc_label();
         let skip2 = a.alloc_label();
         a.emit_u8(0xAA);           // pos 0
-        a.jcc_rel8_label(5, skip1); // jne .skip1: pos 1 → disp = 3-3=0 → wait...
-        a.emit_u8(0xBB);           // pos 3
-        a.set_label(skip1);        // pos 4
-        a.jcc_rel8_label(4, skip2); // je .skip2: pos 4 → disp = 7-6=1
-        a.emit_u8(0xCC);           // pos 6
-        a.set_label(skip2);        // pos 7
-        a.emit_u8(0xDD);           // pos 7
+        a.jcc_rel8_label(5, skip1); // jne .skip1: now rel32 (6B)
+        a.emit_u8(0xBB);           // pos 7
+        a.set_label(skip1);        // pos 8
+        a.jcc_rel8_label(4, skip2); // je .skip2: now rel32 (6B)
+        a.emit_u8(0xCC);           // pos 14
+        a.set_label(skip2);        // pos 15
+        a.emit_u8(0xDD);           // pos 15
         a.resolve_fixups();
         //   pos 0: AA
-        //   pos 1: 75 02 (jne .skip1 at pos 4 → disp = 4-3=1)
-        //   pos 3: BB
-        //   pos 4: 74 01 (je .skip2 at pos 7 → disp = 7-6=1)
-        //   pos 6: CC
-        //   pos 7: DD
-        assert_eq!(a.as_slice(), &[0xAA, 0x75, 0x01, 0xBB, 0x74, 0x01, 0xCC, 0xDD]);
+        //   pos 1: 0F 85 01 00 00 00  (jne .skip1 at pos 8: disp = 8 - 7 = 1)
+        //   pos 7: BB
+        //   pos 8: 0F 84 01 00 00 00  (je .skip2 at pos 15: disp = 15 - 14 = 1)
+        //   pos 14: CC
+        //   pos 15: DD
+        assert_eq!(a.as_slice(), &[0xAA, 0x0F, 0x85, 0x01, 0x00, 0x00, 0x00, 0xBB, 0x0F, 0x84, 0x01, 0x00, 0x00, 0x00, 0xCC, 0xDD]);
     }
 }

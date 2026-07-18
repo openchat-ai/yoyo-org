@@ -1,0 +1,6 @@
+; Test V3 executor: HANDLER 0 triggers emit_h00_code with I/O + executor pipeline
+00 00 40 00   ; HANDLER 0 → V3 executor + I/O (emit_h00_code body, .ty body skipped)
+
+; HANDLER 1 (stops skipping, but unreachable since H_00 exits process)
+00 00 40 01
+00 00 FF       ; RET
