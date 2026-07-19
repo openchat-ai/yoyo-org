@@ -227,13 +227,13 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 1);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 3);
-        // sub rsp must be 16-byte aligned: 0x20 shadow + 3  8 args = 0x38   ?0x40
-        asm.sub_imm(Reg::Rsp, 0x40);
+        // sub rsp must be 16-byte aligned: 3 pushes (24) + 0x48 (72) = 96 = 16*6
+        asm.sub_imm(Reg::Rsp, 0x48);
         asm.mov_qword_rsp_disp(0x20, 3);   // 5th: dwCreationDisposition = OPEN_EXISTING
         asm.mov_qword_rsp_disp(0x28, 0x80); // 6th: dwFlagsAndAttributes = FILE_ATTRIBUTE_NORMAL
         asm.mov_qword_rsp_disp(0x30, 0);   // 7th: hTemplateFile
         asm.call_iat_thunk(Win32Api::CreateFileA as u8);
-        asm.add_imm(Reg::Rsp, 0x40);
+        asm.add_imm(Reg::Rsp, 0x48);
         asm.mov_rr(Reg::R12, Reg::Rax);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.mov_imm64(Reg::Rdx, 0);
@@ -284,13 +284,13 @@ impl Platform for Win32Platform {
         asm.mov_imm64(Reg::R8, 0);
         asm.mov_imm64(Reg::R9, 0);
         asm.mov_imm64(Reg::Rax, 2);
-        // sub rsp must be 16-byte aligned: 0x20 shadow + 3  8 args = 0x38   ?0x40
-        asm.sub_imm(Reg::Rsp, 0x40);
+        // sub rsp must be 16-byte aligned: 3 pushes (24) + 0x48 (72) = 96 = 16*6
+        asm.sub_imm(Reg::Rsp, 0x48);
         asm.mov_qword_rsp_disp(0x20, 2);  // 5th: dwCreationDisposition = CREATE_ALWAYS
         asm.mov_qword_rsp_disp(0x28, 0);  // 6th: dwFlagsAndAttributes
         asm.mov_qword_rsp_disp(0x30, 0);  // 7th: hTemplateFile
         asm.call_iat_thunk(Win32Api::CreateFileA as u8);
-        asm.add_imm(Reg::Rsp, 0x40);
+        asm.add_imm(Reg::Rsp, 0x48);
         asm.mov_rr(Reg::R12, Reg::Rax);
         asm.mov_rr(Reg::Rcx, Reg::R12);
         asm.mov_rr(Reg::Rdx, Reg::R13);
@@ -377,16 +377,12 @@ impl Platform for Win32Platform {
         asm.mov_byte_mem_imm(Reg::Rdi, 0);
         asm.lea_rsp_sib32(Reg::R13, 0x1010); // R13 = "output.exe"
 
-        // Pipeline: loadfile + V3 executor + writefile
+        // Pipeline: loadfile + writefile (BYPASS V3 executor for now)
         asm.mov_rr(Reg::Rsi, Reg::R12);
         self.emit_loadfile(asm, 0, 0)?;
 
-        // V3 executor: R12=buf, RDX=size
-        asm.mov_rr(Reg::R12, Reg::Rax);
-        executor::emit_v3_executor(asm)?;
-
-        // Write output: RAX=output_size, RDX=output_buf, R13=output filename
-        asm.mov_rr(Reg::R8, Reg::Rax);
+        asm.mov_rr(Reg::R8, Reg::Rdx);
+        asm.mov_rr(Reg::Rdx, Reg::R12);
         asm.mov_rr(Reg::Rsi, Reg::R13);
         self.emit_writefile(asm, 0, 0, 0)?;
 
