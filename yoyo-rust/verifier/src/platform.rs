@@ -507,7 +507,60 @@ impl Win32Platform {
         asm.add_rdi_imm(0x200);
         asm.add_rr(Reg::Rdi, Reg::R15);
         asm.mov_imm64(Reg::Rcx, idata_sz as u64);
-        asm.rep_movsb();
+asm.rep_movsb();
+
+        // ════════════ Patch IAT thunks in generated code ════════════
+        // Scan code_buffer for FF 15 <api> 00 00 00, patch disp32
+        // RSI = scan ptr, RDI = end ptr, R14 = iat_rva_base
+        asm.mov_rr(Reg::Rsi, Reg::R13);
+        asm.mov_rr(Reg::Rdi, Reg::R13);
+        asm.add_rr(Reg::Rdi, Reg::Rbx);
+        asm.mov_imm64(Reg::R14, exit_iat_off as u64 - 48);
+        let iat_loop = asm.alloc_label();
+        let iat_adv1 = asm.alloc_label();
+        let iat_adv2 = asm.alloc_label();
+        let iat_adv3 = asm.alloc_label();
+        asm.set_label(iat_loop);
+        asm.cmp_rr(Reg::Rsi, Reg::Rdi); asm.jcc_rel8_label(3, iat_adv3); // JAE done
+        asm.mov_reg_byte_mem(Reg::Rax, Reg::Rsi);
+        asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(5, iat_adv1); // not FF → adv1
+        asm.cmp_rr(Reg::Rsi, Reg::Rdi); asm.jcc_rel8_label(3, iat_adv1); // at end
+        asm.mov_reg_byte_mem(Reg::Rax, Reg::Rsi);
+        asm.cmp_al_imm8(0x15); asm.jcc_rel8_label(5, iat_adv2); // not 15 → adv2
+        // Check remaining 4 bytes are available
+        asm.lea_mem(Reg::Rax, Reg::Rsi, 5);
+        asm.cmp_rr(Reg::Rax, Reg::Rdi); asm.jcc_rel8_label(3, iat_adv3); // JAE → not enough
+        // Check bytes 3-5 are 00 00 00 (the api_index byte at [RSI+2] can be anything)
+        for off in 3..=5 {
+            asm.mov_reg_byte_mem(Reg::Rax, Reg::Rsi);
+            asm.cmp_al_imm8(0); asm.jcc_rel8_label(5, iat_adv3); // not zero → skip
+        }
+        // Found FF 15 at [RSI]. RSI+2 = api_index byte.
+        // Patch disp32 at [RSI+2..RSI+6] (4 bytes)
+        // disp32 = (idata_rva + iat_rva_base + api*8) - (code_VA + offset_in_code + 6)
+        // offset_in_code = RSI - R13, code_VA = 0x1000 + stub_sz
+        // Compute target = idata_rva + iat_rva_base + api*8
+        asm.mov_rr(Reg::Rax, Reg::R12);
+        asm.add_rr(Reg::Rax, Reg::R14);
+        asm.mov_reg_byte_mem(Reg::Rcx, Reg::Rsi); // AL = api_index byte
+        asm.emit_u8(0x48); asm.emit_u8(0xC1); asm.emit_u8(0xE1); asm.emit_u8(0x03); // shl rcx, 3
+        asm.add_rr(Reg::Rax, Reg::Rcx);
+        // Compute source = code_VA + offset_in_code + 6
+        asm.mov_rr(Reg::Rcx, Reg::Rsi);
+        asm.sub_rr(Reg::Rcx, Reg::R13); // RCX = offset_in_code
+        asm.mov_imm64(Reg::Rdx, 0x1000 + stub_sz as u64);
+        asm.add_rr(Reg::Rcx, Reg::Rdx);
+        asm.add_imm(Reg::Rcx, 6);
+        // disp32 = target - source
+        asm.sub_rr(Reg::Rax, Reg::Rcx);
+        // Write disp32 at [RSI+2]
+        asm.lea_mem(Reg::Rdi, Reg::Rsi, 2);
+        asm.emit_u8(0x89); asm.emit_u8(0x07); // mov [rdi], eax
+        asm.add_imm(Reg::Rsi, 6);
+        asm.jmp_rel8_label(iat_loop);
+        asm.set_label(iat_adv1); asm.inc(Reg::Rsi); asm.jmp_rel8_label(iat_loop);
+        asm.set_label(iat_adv2); asm.add_imm(Reg::Rsi, 2); asm.jmp_rel8_label(iat_loop);
+        asm.set_label(iat_adv3); // done
 
         // ════════════ Patch header fields ════════════
         // 1) SizeOfCode at 0x05C = text_fsize

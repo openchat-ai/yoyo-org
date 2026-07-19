@@ -484,31 +484,65 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     asm.jmp_rel8_label(p2_loop);
 
     // ══ ALLOC pass2: emit VirtualAlloc(0, vv, MEM_RW, PAGE_RW) → store to state[ss] ══
-    // Emitted code: mov rcx,0; mov rdx,vv; mov r8,0x3000; mov r9,0x40; sub rsp,0x28; FF 15 00 00 00 00; add rsp,0x28; mov [r15+ss*8],rax
+    // Emitted: xor ecx,ecx; xor edx,edx; mov dl,r8b; mov r8d,0x3000; mov r9d,0x40;
+    //          sub rsp,0x28; FF 15 00 00 00 00; add rsp,0x28; mov [r15+ss*8],rax
     asm.set_label(h_alloc2);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (ss → R9B)
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (vv → R8B)
-    // mov rcx, 0
-    raw(asm, &[0x31, 0xC9]); asm.stosb(); raw(asm, &[0x31, 0xC9]); asm.stosb(); // 31 C9 = xor ecx,ecx → mov rcx,0
-    // Wait, 31 C9 is xor ecx,ecx. I need mov rcx,0 → 48 31 C9 or 48 C7 C1 00 00 00 00
-    // Actually, xor ecx,ecx zero-extends to rcx, so 31 C9 is fine
-    // mov rdx, vv (R8B contains vv). Need to zero-extend to 64-bit: xor edx,edx; mov dl, r8b
-    raw(asm, &[0x31, 0xD2]); asm.stosb(); raw(asm, &[0x31, 0xD2]); asm.stosb(); // 31 D2 = xor edx,edx
-    raw(asm, &[0x44, 0x8A, 0xC0]); asm.stosb(); raw(asm, &[0x44, 0x8A, 0xC0]); asm.stosb(); // NO! This is read from R8B, I need mov dl, r8b → 44 88 C2
-    // Let me fix: 44 88 C2 = mov dl, r8b
-    // Hmm, this is getting complicated. Let me use a simpler approach for the ALLOC handler.
-    // Just emit the x64 bytes directly.
-    asm.jmp_rel8_label(p2_loop); // TODO: implement ALLOC properly
+    // xor ecx, ecx (31 C9)
+    raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb();
+    // xor edx, edx (31 D2)
+    raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xD2]); asm.stosb();
+    // mov dl, r8b (44 88 C2)
+    raw(asm, &[0xB0, 0x44]); asm.stosb(); raw(asm, &[0xB0, 0x88]); asm.stosb(); raw(asm, &[0xB0, 0xC2]); asm.stosb();
+    // mov r8d, 0x3000 (41 B8 00 30 00 00)
+    raw(asm, &[0xB0, 0x41]); asm.stosb(); raw(asm, &[0xB0, 0xB8]); asm.stosb();
+    raw(asm, &[0xB8]); asm.emit_u32(0x3000); asm.stosd();
+    // mov r9d, 0x40 (41 B9 40 00 00 00)
+    raw(asm, &[0xB0, 0x41]); asm.stosb(); raw(asm, &[0xB0, 0xB9]); asm.stosb();
+    raw(asm, &[0xB8]); asm.emit_u32(0x40); asm.stosd();
+    // sub rsp, 0x28 (48 83 EC 28)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x28]); asm.stosb();
+    // FF 15 00 00 00 00 (VirtualAlloc IAT thunk, api_index=0)
+    raw(asm, &[0xB0, 0xFF]); asm.stosb(); raw(asm, &[0xB0, 0x15]); asm.stosb();
+    raw(asm, &[0x31, 0xC0]); raw(asm, &[0xB0, 0x00]); asm.stosd(); // EAX=0 → writes 00 00 00 00
+    // add rsp, 0x28 (48 83 C4 28)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x28]); asm.stosb();
+    // mov [r15+ss*8], rax (49 89 47 <ss*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    // Compute disp8 = R9B * 8, emit via stosb
+    raw(asm, &[0x41, 0x8A, 0xC1]); // mov al, r9b
+    raw(asm, &[0xC0, 0xE0, 0x03]); // shl al, 3
+    asm.stosb(); // emit disp8, RDI++
+    asm.jmp_rel8_label(p2_loop);
 
     // ══ READ pass2: emit loadfile sequence ══
+    // Emitted: load state[ff]→RCX; CreateFileA; GetFileSize; VirtualAlloc; ReadFile; CloseHandle
+    // store buffer to state[ss], fileSize to state[ss+1]
     asm.set_label(h_read2);
-    asm.jmp_rel8_label(p2_loop); // TODO: implement READ
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (ss → R9B, dest slot)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ff → R8B, filename slot)
+    // TODO: emit full READ sequence (CreateFileA + GetFileSize + VirtualAlloc + ReadFile + CloseHandle)
+    asm.jmp_rel8_label(p2_loop);
 
     // ══ WRITE pass2: emit writefile sequence ══
+    // Emitted: load state[ff]→RCX; CreateFileA; WriteFile(state[id], state[ss]); CloseHandle
     asm.set_label(h_write2);
-    asm.jmp_rel8_label(p2_loop); // TODO: implement WRITE
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (id → R9B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ff → R8B, filename slot)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC3]); // mov r11b, al (ss → R11B, size slot)
+    // TODO: emit full WRITE sequence (CreateFileA + WriteFile + CloseHandle)
+    asm.jmp_rel8_label(p2_loop);
 
     // ---- Skip to EOL (pass 1) ----
     asm.set_label(skip1);
