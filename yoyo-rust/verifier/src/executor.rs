@@ -84,6 +84,14 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     let skip2 = asm.alloc_label();
     let h_set1 = asm.alloc_label(); let h_hand1 = asm.alloc_label(); let h_ret1 = asm.alloc_label();
     let h_set2 = asm.alloc_label(); let h_hand2 = asm.alloc_label(); let h_ret2 = asm.alloc_label();
+    let h_get1 = asm.alloc_label(); let h_get2 = asm.alloc_label();
+    let h_add1 = asm.alloc_label(); let h_add2 = asm.alloc_label();
+    let h_sub1 = asm.alloc_label(); let h_sub2 = asm.alloc_label();
+    let h_cmp1 = asm.alloc_label(); let h_cmp2 = asm.alloc_label();
+    let h_inc1 = asm.alloc_label(); let h_inc2 = asm.alloc_label();
+    let h_dec1 = asm.alloc_label(); let h_dec2 = asm.alloc_label();
+    let h_addv1 = asm.alloc_label(); let h_addv2 = asm.alloc_label();
+    let h_subv1 = asm.alloc_label(); let h_subv2 = asm.alloc_label();
 
     // ══════ PASS 1 ══════
     asm.set_label(p1_loop);
@@ -91,6 +99,7 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     // Dispatch SET(0x30), HANDLER(0x40), RET(0xFF)
     asm.cmp_al_imm8(0x30); asm.jcc_rel8_label(4, h_set1);
     asm.cmp_al_imm8(0x40); asm.jcc_rel8_label(4, h_hand1);
+    asm.cmp_al_imm8(0x60); asm.jcc_rel8_label(4, h_get1);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret1);
     asm.jmp_rel8_label(skip1); // unknown → skip
 
@@ -126,6 +135,7 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     emit_prefix_read(asm, sw, rh, skip2, p2_done, 0x80);
     asm.cmp_al_imm8(0x30); asm.jcc_rel8_label(4, h_set2);
     asm.cmp_al_imm8(0x40); asm.jcc_rel8_label(4, h_hand2);
+    asm.cmp_al_imm8(0x60); asm.jcc_rel8_label(4, h_get2);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret2);
     asm.jmp_rel8_label(skip2);
 
@@ -149,23 +159,30 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     asm.stosd(); // emit simm32, RDI += 4
     asm.jmp_rel8_label(p2_loop);
 
-    // HANDLER pass2: store offset = RDI - R14 - 0x800 at [R14 + hh*4]
-    asm.set_label(h_hand2);
-    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
-    raw(asm, &[0x88, 0xC1]); // mov cl, al (hh)
-    // compute offset
-    raw(asm, &[0x48, 0x89, 0xF8]); // mov rax, rdi
-    raw(asm, &[0x4C, 0x29, 0xF0]); // sub rax, r14
-    raw(asm, &[0x48, 0x2D, 0x00, 0x08, 0x00, 0x00]); // sub rax, 0x800
-    raw(asm, &[0x41, 0x89, 0x04, 0x8E]); // mov [r14+rcx*4], eax
+    // GET pass2: emit 49 8B 47 <src*8> 49 89 47 <dst*8> (8B)
+    asm.set_label(h_get2);
+    { let o=asm.bytes.len(); let tp=asm.get_label_offset(sw); let d=(tp as i32-(o as i32+5)).to_le_bytes();
+      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
+    { let o=asm.bytes.len(); let tp=asm.get_label_offset(rh); let d=(tp as i32-(o as i32+5)).to_le_bytes();
+      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
+    asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]);
+    { let o=asm.bytes.len(); let tp=asm.get_label_offset(sw); let d=(tp as i32-(o as i32+5)).to_le_bytes();
+      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
+    { let o=asm.bytes.len(); let tp=asm.get_label_offset(rh); let d=(tp as i32-(o as i32+5)).to_le_bytes();
+      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
+    asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]);
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC0]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb();
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb();
     asm.jmp_rel8_label(p2_loop);
 
-    // RET pass2: emit C3 into output buffer via stosb
-    asm.set_label(h_ret2);
-    raw(asm, &[0xB0, 0xC3]); asm.stosb(); // mov al, 0xC3; stosb
-    asm.jmp_rel8_label(p2_loop);
-
-    // ── Skip to EOL (pass 1) ──
+    // ---- Skip to EOL (pass 1) ----
+    // ---- Skip to EOL (pass 1) ---- ──
     asm.set_label(skip1);
     emit_skip_eol(asm, p1_loop);
 
