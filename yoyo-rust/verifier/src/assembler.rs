@@ -161,15 +161,15 @@ impl X64Assembler {
         self.bytes.extend_from_slice(bytes);
     }
 
-    fn emit_i32(&mut self, val: i32) {
+    pub fn emit_i32(&mut self, val: i32) {
         self.bytes.extend(&val.to_le_bytes());
     }
 
-    fn emit_u32(&mut self, val: u32) {
+    pub fn emit_u32(&mut self, val: u32) {
         self.bytes.extend(&val.to_le_bytes());
     }
 
-    fn emit_u64(&mut self, val: u64) {
+    pub fn emit_u64(&mut self, val: u64) {
         self.bytes.extend(&val.to_le_bytes());
     }
 

@@ -23,6 +23,15 @@ fn hex_table() -> Vec<u8> {
 
 fn raw(asm: &mut X64Assembler, b: &[u8]) { asm.bytes.extend_from_slice(b); }
 
+/// Emit call rel32 with compile-time computed displacement (no fixup entry).
+fn emit_direct_call(asm: &mut X64Assembler, target: usize) {
+    let off = asm.bytes.len();
+    let target_pos = asm.get_label_offset(target);
+    let disp = target_pos as i32 - (off as i32 + 5);
+    asm.emit_u8(0xE8);
+    asm.emit_i32(disp);
+}
+
 pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     let hex_lbl = asm.alloc_label();
     let after_tbl = asm.alloc_label();
@@ -161,16 +170,10 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
 
     // GET pass2: emit 49 8B 47 <src*8> 49 89 47 <dst*8> (8B)
     asm.set_label(h_get2);
-    { let o=asm.bytes.len(); let tp=asm.get_label_offset(sw); let d=(tp as i32-(o as i32+5)).to_le_bytes();
-      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
-    { let o=asm.bytes.len(); let tp=asm.get_label_offset(rh); let d=(tp as i32-(o as i32+5)).to_le_bytes();
-      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
+    emit_direct_call(asm, sw); emit_direct_call(asm, rh);
     asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC1]);
-    { let o=asm.bytes.len(); let tp=asm.get_label_offset(sw); let d=(tp as i32-(o as i32+5)).to_le_bytes();
-      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
-    { let o=asm.bytes.len(); let tp=asm.get_label_offset(rh); let d=(tp as i32-(o as i32+5)).to_le_bytes();
-      asm.emit_u8(0xE8); asm.emit_u8(d[0]); asm.emit_u8(d[1]); asm.emit_u8(d[2]); asm.emit_u8(d[3]); }
+    emit_direct_call(asm, sw); emit_direct_call(asm, rh);
     asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC0]);
     raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
