@@ -306,15 +306,17 @@ pub fn link(startup: &[u8], handler_code: &[u8], out_path: &Path) -> Result<(), 
     pe.resize(dllchars_off + 2, 0);
     pe[dllchars_off..dllchars_off + 2].copy_from_slice(&0x0140u16.to_le_bytes());
 
-    // SizeOfStackReserve (offset 0x48, u64) — Win64 default 1 MB
+    // SizeOfStackReserve (offset 0x48, u64) — increased to 2 MB
+    // to accommodate ntdll LFH-initialisation recursion depth.
     let stack_rsv_off = (opt_start + 0x48) as usize;
     pe.resize(stack_rsv_off + 8, 0);
-    pe[stack_rsv_off..stack_rsv_off + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+    pe[stack_rsv_off..stack_rsv_off + 8].copy_from_slice(&(2u64 << 20).to_le_bytes());
 
-    // SizeOfStackCommit (offset 0x50, u64) — 4 KB initial commit
+    // SizeOfStackCommit (offset 0x50, u64) — full 2 MB commit (no guard pages)
+    // avoids kernel-stack exhaustion from rapid guard-page faults during LFH init.
     let stack_cmt_off = (opt_start + 0x50) as usize;
     pe.resize(stack_cmt_off + 8, 0);
-    pe[stack_cmt_off..stack_cmt_off + 8].copy_from_slice(&(4u64 << 10).to_le_bytes());
+    pe[stack_cmt_off..stack_cmt_off + 8].copy_from_slice(&(2u64 << 20).to_le_bytes());
 
     // SizeOfHeapReserve (offset 0x58, u64) — Win64 default 1 MB
     let heap_rsv_off = (opt_start + 0x58) as usize;
@@ -581,6 +583,322 @@ fn by_name_entry_offset(unique: &[Win32Api], target: Win32Api, _n: usize) -> u32
         off += 2 + name.len() as u32 + 1; // hint(2) + name + null
     }
     0
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Runtime PE template generator
+// ═══════════════════════════════════════════════════════════════════════
+
+/// File alignment for output PE (smaller than gen2's 0x400 to reduce header size)
+const OUT_FILE_ALIGN: u32 = 0x200;
+/// Headers size = align_up(0x150, 0x200) = 0x200
+const OUT_HEADERS_SIZE: u32 = align_up(0xD8 + 3 * 40, OUT_FILE_ALIGN);
+
+/// Patch locations within the PE header template (file offsets).
+pub struct PeHeaderPatches {
+    pub size_of_code: u32,          // 0x05C
+    pub size_of_initialized_data: u32, // 0x060
+    pub size_of_image: u32,         // 0x090
+    pub import_rva: u32,            // 0x0D0
+    pub import_size: u32,           // 0x0D4
+    pub text_vsize: u32,            // 0x150
+    pub text_rawsize: u32,          // 0x158
+    pub idata_vaddr: u32,           // 0x17C
+    pub idata_rawsize: u32,         // 0x180
+    pub idata_foff: u32,            // 0x184
+    pub bss_vaddr: u32,            // 0x1A4
+}
+
+/// Pre-computed templates and metadata for building a PE from emitted code at runtime.
+pub struct PeOutputInfo {
+    pub header: Vec<u8>,                  // 0x200 byte PE header (with placeholder size fields)
+    pub startup_stub: Vec<u8>,            // ~35 byte entry stub
+    pub idata: Vec<u8>,                   // .idata section template (RVAs relative to .idata start)
+    pub idata_rva_fixups: Vec<u32>,       // Offsets in .idata of u32/u64 RVA fields needing idata_rva addition
+    pub patches: PeHeaderPatches,
+    pub stub_size: u32,
+    pub idata_size: u32,
+    pub exit_process_iat_off: u32,        // Offset of ExitProcess IAT entry within .idata
+}
+
+/// Return the runtime PE output templates.
+pub fn pe_output_template() -> PeOutputInfo {
+    // ── Compute .idata layout ──
+    let unique_apis = vec![
+        Win32Api::VirtualAlloc,   // 0
+        Win32Api::CreateFileA,    // 1
+        Win32Api::GetFileSize,    // 2
+        Win32Api::ReadFile,       // 3
+        Win32Api::WriteFile,      // 4
+        Win32Api::CloseHandle,    // 5
+        Win32Api::LibyoyoExit,    // 12 → "ExitProcess"
+    ];
+    let n = unique_apis.len();
+    // INT start after 2 descriptors = 2 * 20 = 0x28
+    let int_rva_base: u32 = 0x28;
+    let iat_rva_base: u32 = int_rva_base + (n as u32 + 1) * 8; // +1 for terminator
+    // Hint/Name RVAs relative to .idata start
+    let mut hint_off = iat_rva_base + (n as u32 + 1) * 8;
+    let mut hint_offsets = Vec::new();
+    for api in &unique_apis {
+        hint_offsets.push(hint_off);
+        let name = WIN32_API_NAMES[*api as usize];
+        hint_off += 2 + name.len() as u32 + 1;
+    }
+    let dll_name_off = hint_off;
+    let idata_total_len = dll_name_off + 14; // "kernel32.dll\0"
+    let idata_size = idata_total_len;
+
+    // ── Build .idata template ──
+    let mut idata = Vec::new();
+    // Descriptor for kernel32.dll
+    idata.extend_from_slice(&int_rva_base.to_le_bytes());        // OriginalFirstThunk
+    idata.extend(&0u32.to_le_bytes());                           // TimeDateStamp
+    idata.extend(&0u32.to_le_bytes());                           // ForwarderChain
+    idata.extend(&dll_name_off.to_le_bytes());                   // Name → "kernel32.dll"
+    idata.extend(&iat_rva_base.to_le_bytes());                   // FirstThunk → IAT
+    // Terminator descriptor
+    idata.extend(&[0u8; 20]);
+    // INT: u64 entries (RVAs relative to .idata start)
+    for hi in &hint_offsets {
+        idata.extend(&(*hi as u64).to_le_bytes());
+    }
+    idata.extend(&0u64.to_le_bytes()); // terminator
+    // IAT: u64 entries (same values)
+    for hi in &hint_offsets {
+        idata.extend(&(*hi as u64).to_le_bytes());
+    }
+    idata.extend(&0u64.to_le_bytes()); // terminator
+    // Hint/Name entries
+    for api in &unique_apis {
+        idata.extend(&0u16.to_le_bytes()); // hint
+        let name = WIN32_API_NAMES[*api as usize];
+        idata.extend(name.as_bytes());
+        idata.push(0);
+    }
+    // DLL name
+    idata.extend(b"kernel32.dll");
+    idata.push(0);
+
+    // Collect RVA fixup offsets in .idata:
+    //   Descriptor 0: [0]=OriginalFirstThunk(u32), [12]=Name(u32), [16]=FirstThunk(u32)
+    //   INT entries: [0x28 .. 0x28+(n+1)*8) as u64
+    //   IAT entries: [iat_rva_base .. iat_rva_base+(n+1)*8) as u64
+    let mut idata_rva_fixups = Vec::new();
+    idata_rva_fixups.push(0);   // OriginalFirstThunk (u32)
+    idata_rva_fixups.push(12);  // Name (u32)
+    idata_rva_fixups.push(16);  // FirstThunk (u32)
+    for i in 0..n {
+        idata_rva_fixups.push(int_rva_base + (i as u32) * 8); // INT entries (u64)
+    }
+    for i in 0..n {
+        idata_rva_fixups.push(iat_rva_base + (i as u32) * 8); // IAT entries (u64)
+    }
+
+    // ExitProcess IAT entry offset within .idata
+    let exit_process_idx = 6; // 7th API (0-indexed)
+    let exit_process_iat_off = iat_rva_base + (exit_process_idx as u32) * 8;
+
+    // ── Build header template ──
+    let mut h = Vec::new();
+    // DOS header
+    h.resize(0x40, 0);
+    h[0] = b'M'; h[1] = b'Z';
+    h[0x3C] = 0x40; // e_lfanew
+
+    // PE signature "PE\0\0"
+    h.extend(b"PE\x00\x00");
+
+    // COFF header
+    h.extend(&0x8664u16.to_le_bytes()); // Machine: x86-64
+    h.extend(&3u16.to_le_bytes());      // NumberOfSections: .text + .idata + .bss
+    h.extend(&0u32.to_le_bytes());      // TimeDateStamp
+    h.extend(&0u32.to_le_bytes());      // PointerToSymbolTable
+    h.extend(&0u32.to_le_bytes());      // NumberOfSymbols
+    let sizeof_opt_hdr: u16 = 240;      // PE32+
+    h.extend(&sizeof_opt_hdr.to_le_bytes());
+    h.extend(&0x002Fu16.to_le_bytes()); // Characteristics
+
+    // Optional header PE32+
+    let opt_start = h.len() as u32; // = 0x58
+    assert_eq!(opt_start, 0x58, "optional header should start at 0x58");
+    h.extend(&0x020Bu16.to_le_bytes()); // Magic
+
+    // Fill optional header up to AddressOfEntryPoint (offset 0x10 from opt_start)
+    // Standard fields region: linker version (2) + SizeOfCode(4) + SizeOfInitData(4) + SizeOfUninitData(4) + AddressOfEntryPoint(4)
+    // = 2 + 4 + 4 + 4 + 4 = 18 bytes
+    // We fill first 14 bytes here (up to SizeOfUninitData exclusive), then explicitly set
+    h.extend(&[0u8; 14]);
+
+    // SizeOfCode (opt_start + 0x04)
+    let soc_off = opt_start + 0x04;
+    h.resize((soc_off + 4) as usize, 0);
+    h[soc_off as usize..(soc_off + 4) as usize].copy_from_slice(&0u32.to_le_bytes()); // placeholder
+
+    // SizeOfInitializedData (opt_start + 0x08)
+    let soid_off = opt_start + 0x08;
+    h.resize((soid_off + 4) as usize, 0);
+    h[soid_off as usize..(soid_off + 4) as usize].copy_from_slice(&0u32.to_le_bytes()); // placeholder
+
+    // SizeOfUninitializedData (opt_start + 0x0C)
+    let souid_off = opt_start + 0x0C;
+    h.resize((souid_off + 4) as usize, 0);
+    h[souid_off as usize..(souid_off + 4) as usize].copy_from_slice(&BSS_VSIZE.to_le_bytes());
+
+    // AddressOfEntryPoint (opt_start + 0x10) = TEXT_RVA
+    let eop_off = opt_start + 0x10;
+    h.resize((eop_off + 4) as usize, 0);
+    h[eop_off as usize..(eop_off + 4) as usize].copy_from_slice(&TEXT_RVA.to_le_bytes());
+
+    // BaseOfCode (opt_start + 0x14)
+    let base_code_off = opt_start + 0x14;
+    h.resize((base_code_off + 4) as usize, 0);
+    h[base_code_off as usize..(base_code_off + 4) as usize].copy_from_slice(&TEXT_RVA.to_le_bytes());
+
+    // ImageBase (opt_start + 0x18, u64) at offset 0x70
+    let img_base_off = opt_start + 0x18;
+    h.resize((img_base_off + 8) as usize, 0);
+    h[img_base_off as usize..(img_base_off + 8) as usize].copy_from_slice(&IMAGE_BASE.to_le_bytes());
+
+    // SectionAlignment (opt_start + 0x20)
+    let sec_align_off = opt_start + 0x20;
+    h.resize((sec_align_off + 4) as usize, 0);
+    h[sec_align_off as usize..(sec_align_off + 4) as usize].copy_from_slice(&SECTION_ALIGN.to_le_bytes());
+
+    // FileAlignment (opt_start + 0x24)
+    let file_align_off = opt_start + 0x24;
+    h.resize((file_align_off + 4) as usize, 0);
+    h[file_align_off as usize..(file_align_off + 4) as usize].copy_from_slice(&OUT_FILE_ALIGN.to_le_bytes());
+
+    // Major/Minor OS Version (opt_start + 0x28)
+    let os_ver_off = opt_start + 0x28;
+    h.resize((os_ver_off + 4) as usize, 0);
+    h[os_ver_off as usize..(os_ver_off + 2) as usize].copy_from_slice(&6u16.to_le_bytes());
+    h[(os_ver_off + 2) as usize..(os_ver_off + 4) as usize].copy_from_slice(&0u16.to_le_bytes());
+
+    // Major/Minor Subsystem Version (opt_start + 0x30)
+    let subsys_ver_off = opt_start + 0x30;
+    h.resize((subsys_ver_off + 4) as usize, 0);
+    h[subsys_ver_off as usize..(subsys_ver_off + 2) as usize].copy_from_slice(&6u16.to_le_bytes());
+    h[(subsys_ver_off + 2) as usize..(subsys_ver_off + 4) as usize].copy_from_slice(&2u16.to_le_bytes());
+
+    // SizeOfImage (opt_start + 0x38)
+    let img_size_off = opt_start + 0x38;
+    h.resize((img_size_off + 4) as usize, 0);
+    h[img_size_off as usize..(img_size_off + 4) as usize].copy_from_slice(&0u32.to_le_bytes()); // placeholder
+
+    // SizeOfHeaders (opt_start + 0x3C)
+    let hdr_size_off = opt_start + 0x3C;
+    h.resize((hdr_size_off + 4) as usize, 0);
+    h[hdr_size_off as usize..(hdr_size_off + 4) as usize].copy_from_slice(&OUT_HEADERS_SIZE.to_le_bytes());
+
+    // SubSystem (opt_start + 0x44) = 3 (CONSOLE)
+    let subsys_off = opt_start + 0x44;
+    h.resize((subsys_off + 2) as usize, 0);
+    h[subsys_off as usize..(subsys_off + 2) as usize].copy_from_slice(&3u16.to_le_bytes());
+
+    // DllCharacteristics (opt_start + 0x46)
+    let dllchars_off = opt_start + 0x46;
+    h.resize((dllchars_off + 2) as usize, 0);
+    h[dllchars_off as usize..(dllchars_off + 2) as usize].copy_from_slice(&0x0140u16.to_le_bytes());
+
+    // SizeOfStackReserve (opt_start + 0x48, u64)
+    let stack_rsv_off = opt_start + 0x48;
+    h.resize((stack_rsv_off + 8) as usize, 0);
+    h[stack_rsv_off as usize..(stack_rsv_off + 8) as usize].copy_from_slice(&(2u64 << 20).to_le_bytes());
+
+    // SizeOfStackCommit (opt_start + 0x50, u64)
+    let stack_cmt_off = opt_start + 0x50;
+    h.resize((stack_cmt_off + 8) as usize, 0);
+    h[stack_cmt_off as usize..(stack_cmt_off + 8) as usize].copy_from_slice(&(2u64 << 20).to_le_bytes());
+
+    // SizeOfHeapReserve (opt_start + 0x58, u64)
+    let heap_rsv_off = opt_start + 0x58;
+    h.resize((heap_rsv_off + 8) as usize, 0);
+    h[heap_rsv_off as usize..(heap_rsv_off + 8) as usize].copy_from_slice(&(1u64 << 20).to_le_bytes());
+
+    // SizeOfHeapCommit (opt_start + 0x60, u64)
+    let heap_cmt_off = opt_start + 0x60;
+    h.resize((heap_cmt_off + 8) as usize, 0);
+    h[heap_cmt_off as usize..(heap_cmt_off + 8) as usize].copy_from_slice(&(4u64 << 10).to_le_bytes());
+
+    // LoaderFlags (opt_start + 0x68) = 0
+    // NumberOfRvaAndSizes (opt_start + 0x6C) = 2
+    let nrvas_off = opt_start + 0x6C;
+    h.resize((nrvas_off + 4) as usize, 0);
+    h[nrvas_off as usize..(nrvas_off + 4) as usize].copy_from_slice(&2u32.to_le_bytes());
+
+    // Data directory [0]: Export (8 bytes) = 0
+    // Already zero from resize
+
+    // Data directory [1]: Import (8 bytes) at opt_start + 0x78
+    let import_dir_off = opt_start + 0x78;
+    h.resize((import_dir_off + 8) as usize, 0);
+    // RVA placeholder (written at runtime)
+    h[import_dir_off as usize..(import_dir_off + 4) as usize].copy_from_slice(&0u32.to_le_bytes());
+    // Size placeholder
+    h[(import_dir_off + 4) as usize..(import_dir_off + 8) as usize].copy_from_slice(&0u32.to_le_bytes());
+
+    // Pad to end of optional header
+    let opt_end = (opt_start + sizeof_opt_hdr as u32) as usize;
+    h.resize(opt_end, 0);
+
+    // ── Section table ──
+    // .text section header at offset 0x148
+    let text_sec_off = h.len() as u32;
+    write_section_header(&mut h, b".text\x00\x00\x00", 0, TEXT_RVA, 0, OUT_HEADERS_SIZE, 0x60000020);
+    // .idata section header at offset 0x170
+    let idata_sec_off = h.len() as u32;
+    write_section_header(&mut h, b".idata\x00\x00", 0, 0, 0, 0, 0xC0000040);
+    // .bss section header at offset 0x198
+    let bss_sec_off = h.len() as u32;
+    write_section_header(&mut h, b".bss\x00\x00\x00\x00", BSS_VSIZE, 0, BSS_VSIZE, 0, 0xC0000040);
+
+    // Pad to OUT_HEADERS_SIZE
+    h.resize(OUT_HEADERS_SIZE as usize, 0);
+
+    // ── Startup stub (placed at .text section start before generated code) ──
+    let stub: Vec<u8> = vec![
+        // sub rsp, 0x1008
+        0x48, 0x81, 0xEC, 0x08, 0x10, 0x00, 0x00,
+        // lea r15, [rsp+0x808]
+        0x4C, 0x8D, 0xBC, 0x24, 0x08, 0x08, 0x00, 0x00,
+        // call generated_code: E8 + rel32 (disp = stub_size - 20 = 35 - 20 = 15 = 0x0F)
+        0xE8, 0x0F, 0x00, 0x00, 0x00,
+        // add rsp, 0x1008
+        0x48, 0x81, 0xC4, 0x08, 0x10, 0x00, 0x00,
+        // xor ecx, ecx
+        0x31, 0xC9,
+        // call ExitProcess via FF 15 (rel32 placeholder = 0x00000000)
+        0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let stub_size = stub.len() as u32; // 35
+
+    // ── Patch offsets ──
+    let patches = PeHeaderPatches {
+        size_of_code: soc_off,
+        size_of_initialized_data: soid_off,
+        size_of_image: img_size_off,
+        import_rva: import_dir_off,
+        import_size: import_dir_off + 4,
+        text_vsize: text_sec_off + 8,
+        text_rawsize: text_sec_off + 12,
+        idata_vaddr: idata_sec_off + 4,
+        idata_rawsize: idata_sec_off + 8,
+        idata_foff: idata_sec_off + 12,
+        bss_vaddr: bss_sec_off + 4,
+    };
+
+    PeOutputInfo {
+        header: h,
+        startup_stub: stub,
+        idata,
+        idata_rva_fixups,
+        patches,
+        stub_size,
+        idata_size,
+        exit_process_iat_off,
+    }
 }
 
 #[cfg(test)]

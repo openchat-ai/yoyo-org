@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use crate::assembler::X64Assembler;
 use crate::executor;
+use crate::executor::emit_v3_executor;
 use crate::types::{IsaResult, Reg};
 
 /// IAT thunk indices embedded in `FF 15 ii 00 00 00` placeholders.
@@ -377,13 +378,16 @@ impl Platform for Win32Platform {
         asm.mov_byte_mem_imm(Reg::Rdi, 0);
         asm.lea_rsp_sib32(Reg::R13, 0x1010); // R13 = "output.exe"
 
-        // Pipeline: loadfile + writefile (BYPASS V3 executor for now)
+// Pipeline: load input.ky → compile via V3 executor → wrap as PE → write output.exe
         asm.mov_rr(Reg::Rsi, Reg::R12);
         self.emit_loadfile(asm, 0, 0)?;
-
-        asm.mov_rr(Reg::R8, Reg::Rdx);
-        asm.mov_rr(Reg::Rdx, Reg::R12);
-        asm.mov_rr(Reg::Rsi, Reg::R13);
+        asm.mov_rr(Reg::R12, Reg::Rax); // R12 = input buffer
+        emit_v3_executor(asm)?;
+        // RAX = code_size, RDX = code_buffer
+        self.emit_pe_wrapper(asm)?;
+        // RAX = PE_size, RDX = PE_buffer
+        asm.mov_rr(Reg::Rsi, Reg::R13); // RSI = "output.exe"
+        asm.mov_rr(Reg::R8, Reg::Rax);  // R8 = PE_size
         self.emit_writefile(asm, 0, 0, 0)?;
 
         // epilogue
@@ -395,7 +399,265 @@ impl Platform for Win32Platform {
         asm.pop(Reg::R13);
         asm.pop(Reg::R12);
         asm.resolve_fixups();
-        asm.ret();
+asm.ret();
+        Ok(())
+    }
+}
+
+impl Win32Platform {
+    /// Emit x64 code that wraps raw emitted code in a valid PE32+.
+    /// Input: RAX=code_size, RDX=code_buffer
+    /// Output: RAX=pe_size, RDX=pe_buffer
+    pub fn emit_pe_wrapper(&self, asm: &mut X64Assembler) -> IsaResult<()> {
+        let info = crate::pe_link::pe_output_template();
+        let stub_sz = info.stub_size;
+        let idata_sz = info.idata.len() as u32;
+        let data_hdr = info.header.as_slice();
+        let data_stub = info.startup_stub.as_slice();
+        let data_idata = info.idata.as_slice();
+        let exit_iat_off = info.exit_process_iat_off;
+
+        asm.push(Reg::Rbp); asm.push(Reg::Rbx);
+        asm.push(Reg::R12); asm.push(Reg::R13);
+        asm.push(Reg::R14); asm.push(Reg::R15);
+
+        asm.mov_rr(Reg::R13, Reg::Rdx);
+        asm.mov_rr(Reg::Rbx, Reg::Rax);
+
+        // ── raw = stub_sz + code_size ──
+        asm.mov_imm64(Reg::Rax, stub_sz as u64);
+        asm.add_rr(Reg::Rax, Reg::Rbx);
+        asm.mov_rr(Reg::R15, Reg::Rax);
+
+        // ── text_vsize = align_up(raw, 0x1000) ──
+        asm.mov_rr(Reg::Rax, Reg::R15);
+        asm.add_imm(Reg::Rax, 0xFFF);
+        asm.xor_edx_edx();
+        asm.mov_imm64(Reg::Rcx, 0x1000); asm.div_r64(Reg::Rcx);
+        asm.mov_imm64(Reg::Rcx, 0x1000); asm.imul_rr(Reg::Rax, Reg::Rcx);
+        asm.mov_rr(Reg::R14, Reg::Rax);
+
+        // ── text_fsize = align_up(raw, 0x200) ──
+        asm.mov_rr(Reg::Rax, Reg::R15);
+        asm.add_imm(Reg::Rax, 0x1FF);
+        asm.xor_edx_edx();
+        asm.mov_imm64(Reg::Rcx, 0x200); asm.div_r64(Reg::Rcx);
+        asm.mov_imm64(Reg::Rcx, 0x200); asm.imul_rr(Reg::Rax, Reg::Rcx);
+        asm.mov_rr(Reg::R15, Reg::Rax);
+
+        // ── idata_rva = 0x1000 + text_vsize ──
+        asm.mov_imm64(Reg::Rax, 0x1000);
+        asm.add_rr(Reg::Rax, Reg::R14);
+        asm.mov_rr(Reg::R12, Reg::Rax);
+
+        // ── VirtualAlloc(0, PE_size=0x400+text_fsize, MEM_RW, PAGE_RW) ──
+        asm.mov_imm64(Reg::Rcx, 0);
+        asm.mov_rr(Reg::Rdx, Reg::R15);
+        asm.add_imm(Reg::Rdx, 0x400);
+        asm.mov_imm64(Reg::R8, 0x3000);
+        asm.mov_imm64(Reg::R9, 0x40);
+        asm.shadow_frame();
+        asm.call_iat_thunk(Win32Api::VirtualAlloc as u8);
+        asm.shadow_ret();
+        asm.mov_rr(Reg::Rbp, Reg::Rax);
+
+        // ════════════ Data copies ════════════
+        // Copy header → PE_buf + 0
+        // Jump over data, then LEA RSI back to it
+        let hdr_lbl = asm.alloc_label();
+        let hdr_done = asm.alloc_label();
+        asm.jmp_rel32_label(hdr_done);
+        asm.set_label(hdr_lbl);
+        asm.bytes.extend_from_slice(data_hdr);
+        asm.set_label(hdr_done);
+        asm.lea_rsi_rip_label(hdr_lbl);
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.mov_imm64(Reg::Rcx, data_hdr.len() as u64);
+        asm.rep_movsb();
+
+        // Copy startup stub → PE_buf + 0x200
+        let stub_lbl = asm.alloc_label();
+        let stub_done = asm.alloc_label();
+        asm.jmp_rel32_label(stub_done);
+        asm.set_label(stub_lbl);
+        asm.bytes.extend_from_slice(data_stub);
+        asm.set_label(stub_done);
+        asm.lea_rsi_rip_label(stub_lbl);
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x200);
+        asm.mov_imm64(Reg::Rcx, stub_sz as u64);
+        asm.rep_movsb();
+
+        // Copy generated code → PE_buf + 0x200 + stub_sz
+        asm.mov_rr(Reg::Rsi, Reg::R13);
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x200 + stub_sz as i32);
+        asm.mov_rr(Reg::Rcx, Reg::Rbx);
+        asm.rep_movsb();
+
+        // Copy .idata → PE_buf + 0x200 + text_fsize
+        let idata_lbl = asm.alloc_label();
+        let idata_done = asm.alloc_label();
+        asm.jmp_rel32_label(idata_done);
+        asm.set_label(idata_lbl);
+        asm.bytes.extend_from_slice(data_idata);
+        asm.set_label(idata_done);
+        asm.lea_rsi_rip_label(idata_lbl);
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x200);
+        asm.add_rr(Reg::Rdi, Reg::R15);
+        asm.mov_imm64(Reg::Rcx, idata_sz as u64);
+        asm.rep_movsb();
+
+        // ════════════ Patch header fields ════════════
+        // 1) SizeOfCode at 0x05C = text_fsize
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x5C);
+        asm.mov_rr(Reg::Rax, Reg::R15);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 2) SizeOfInitializedData at 0x060 = 0x200
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x60);
+        asm.mov_imm64(Reg::Rax, 0x200);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 3) SizeOfImage at 0x090 = text_vsize + 0x3000
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x90);
+        asm.mov_rr(Reg::Rax, Reg::R14);
+        asm.add_imm(Reg::Rax, 0x3000);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 4) Import RVA at 0x0D0 = idata_rva
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x0D0);
+        asm.mov_rr(Reg::Rax, Reg::R12);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 5) Import Size at 0x0D4 = idata_sz
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x0D4);
+        asm.mov_imm64(Reg::Rax, idata_sz as u64);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 6) .text VirtualSize at 0x150 = stub_sz + code_size
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x150);
+        asm.mov_imm64(Reg::Rax, stub_sz as u64);
+        asm.add_rr(Reg::Rax, Reg::Rbx);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 7) .text SizeOfRawData at 0x158 = text_fsize
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x158);
+        asm.mov_rr(Reg::Rax, Reg::R15);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 8) .idata VirtualAddress at 0x17C = idata_rva
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x17C);
+        asm.mov_rr(Reg::Rax, Reg::R12);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 9) .idata SizeOfRawData at 0x180 = 0x200
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x180);
+        asm.mov_imm64(Reg::Rax, 0x200);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 9b) .idata VirtualSize at 0x178 = idata_sz (aligned to 0x1000)
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x178);
+        asm.mov_imm64(Reg::Rax, idata_sz as u64);
+        asm.mov_imm64(Reg::Rcx, 0xFFF);
+        asm.add_rr(Reg::Rax, Reg::Rcx);
+        asm.mov_imm64(Reg::Rcx, 0x1000);
+        asm.xor_edx_edx();
+        asm.div_r64(Reg::Rcx);
+        asm.mov_imm64(Reg::Rcx, 0x1000);
+        asm.imul_rr(Reg::Rax, Reg::Rcx);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 10) .idata PointerToRawData at 0x184 = 0x200 + text_fsize
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x184);
+        asm.mov_imm64(Reg::Rax, 0x200);
+        asm.add_rr(Reg::Rax, Reg::R15);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 11) .bss VirtualAddress at 0x1A4 = max(0x3000, idata_rva + 0x1000)
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x1A4);
+        asm.mov_rr(Reg::Rax, Reg::R12);
+        asm.add_imm(Reg::Rax, 0x1000);
+        asm.mov_imm64(Reg::Rcx, 0x3000);
+        asm.cmp_rr(Reg::Rax, Reg::Rcx);
+        let bss_ge = asm.alloc_label();
+        let bss_done = asm.alloc_label();
+        asm.jcc_rel8_label(3, bss_ge);
+        asm.mov_rr(Reg::Rax, Reg::Rcx);
+        asm.jmp_rel8_label(bss_done);
+        asm.set_label(bss_ge);
+        asm.set_label(bss_done);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // 12) .bss SizeOfRawData at 0x1A8 = 0 (no raw data, zero-initialized)
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x1A8);
+        asm.mov_imm64(Reg::Rax, 0);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // ════════════ Patch .idata RVA fields ════════════
+        let idata_patch_lbl = asm.alloc_label();
+        let idata_patch_done = asm.alloc_label();
+        asm.jmp_rel32_label(idata_patch_done);
+        asm.set_label(idata_patch_lbl);
+        for &off in &info.idata_rva_fixups {
+            asm.emit_u32(off);
+        }
+        asm.emit_u32(0xFFFFFFFF);
+        asm.set_label(idata_patch_done);
+        asm.lea_rsi_rip_label(idata_patch_lbl);
+
+        asm.mov_imm64(Reg::R14, 0x200);
+        asm.add_rr(Reg::R14, Reg::R15);
+
+        let loop_top = asm.alloc_label();
+        let loop_done = asm.alloc_label();
+        asm.set_label(loop_top);
+        asm.emit_u8(0xAD);
+        asm.emit_u8(0x83); asm.emit_u8(0xF8); asm.emit_u8(0xFF);
+        asm.jcc_rel8_label(4, loop_done);
+
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rr(Reg::Rdi, Reg::R14);
+        asm.emit_u8(0x48); asm.emit_u8(0x01); asm.emit_u8(0xC7);
+
+        asm.emit_u8(0x8B); asm.emit_u8(0x0F);
+        asm.emit_u8(0x44); asm.emit_u8(0x01); asm.emit_u8(0xE1);
+        asm.emit_u8(0x89); asm.emit_u8(0x0F);
+
+        asm.jmp_rel8_label(loop_top);
+        asm.set_label(loop_done);
+
+        // ════════════ Patch ExitProcess disp in startup stub ════════════
+        asm.mov_rr(Reg::Rdi, Reg::Rbp);
+        asm.add_rdi_imm(0x200 + 31);
+        asm.mov_rr(Reg::Rax, Reg::R12);
+        asm.add_imm(Reg::Rax, exit_iat_off as i32);
+        asm.mov_imm64(Reg::Rcx, 0x1000 + stub_sz as u64);
+        asm.sub_rr(Reg::Rax, Reg::Rcx);
+        asm.emit_u8(0x89); asm.emit_u8(0x07);
+
+        // ════════════ Return ════════════
+        asm.mov_rr(Reg::Rax, Reg::R15);
+        asm.add_imm(Reg::Rax, 0x400);
+        asm.mov_rr(Reg::Rdx, Reg::Rbp);
+
+        asm.pop(Reg::R15); asm.pop(Reg::R14);
+        asm.pop(Reg::R13); asm.pop(Reg::R12);
+        asm.pop(Reg::Rbx); asm.pop(Reg::Rbp);
         Ok(())
     }
 }

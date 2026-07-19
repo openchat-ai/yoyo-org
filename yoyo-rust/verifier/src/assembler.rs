@@ -771,6 +771,55 @@ impl X64Assembler {
 
     // ── Syscall (Linux) ──
 
+    // ── Division / multiplication (for PE builder alignment) ──
+
+    /// `DIV r/m64` — unsigned divide RDX:RAX by `divisor`. RAX = quotient, RDX = remainder.
+    /// REX.W + F7 + modrm(3, 6, rm)
+    pub fn div_r64(&mut self, divisor: Reg) {
+        self.emit_rex(true, false, false, divisor.rex_b());
+        self.emit_u8(0xF7);
+        self.emit_modrm(3, 6, divisor.low3());
+    }
+
+    /// `xor edx, edx` (31 D2, 2 bytes) — zero RDX (works because writing to EDX zeros upper 32 bits)
+    pub fn xor_edx_edx(&mut self) {
+        self.emit_u8(0x31);
+        self.emit_u8(0xD2);
+    }
+
+    // ── LEA RDI, [RIP + disp] with label fixup ──
+
+    /// Emit `48 8D 3D 00 00 00 00` (LEA RDI, [RIP + 0]) and record a fixup
+    /// so the disp32 is patched to point at `label` at resolution time.
+    pub fn lea_rdi_rip_label(&mut self, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0x48);
+        self.emit_u8(0x8D);
+        self.emit_u8(0x3D);
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 3, label_id: label });
+    }
+
+    /// Emit `48 8D 35 00 00 00 00` (LEA RSI, [RIP + 0]) and record a fixup.
+    pub fn lea_rsi_rip_label(&mut self, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0x48);
+        self.emit_u8(0x8D);
+        self.emit_u8(0x35);
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 3, label_id: label });
+    }
+
+    /// Emit `48 8D 0D 00 00 00 00` (LEA RCX, [RIP + 0]) and record a fixup.
+    pub fn lea_rcx_rip_label(&mut self, label: usize) {
+        let off = self.bytes.len();
+        self.emit_u8(0x48);
+        self.emit_u8(0x8D);
+        self.emit_u8(0x0D);
+        self.emit_i32(0);
+        self.fixups32.push(Fixup32 { rel32_off: off + 3, label_id: label });
+    }
+
     /// `syscall` (0F 05)
     pub fn syscall(&mut self) {
         self.emit_u8(0x0F);
