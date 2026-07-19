@@ -619,6 +619,7 @@ pub struct PeOutputInfo {
     pub stub_size: u32,
     pub idata_size: u32,
     pub exit_process_iat_off: u32,        // Offset of ExitProcess IAT entry within .idata
+    pub iat_rva_base: u32,                // Base offset of IAT entries within .idata
 }
 
 /// Return the runtime PE output templates.
@@ -898,6 +899,7 @@ pub fn pe_output_template() -> PeOutputInfo {
         stub_size,
         idata_size,
         exit_process_iat_off,
+        iat_rva_base,
     }
 }
 

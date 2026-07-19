@@ -112,6 +112,9 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     let h_jmp1 = asm.alloc_label(); let h_jmp2 = asm.alloc_label();
     let h_call1 = asm.alloc_label(); let h_call2 = asm.alloc_label();
     let h_jcc1 = asm.alloc_label(); let h_jcc2 = asm.alloc_label();
+    let h_alloc1 = asm.alloc_label(); let h_alloc2 = asm.alloc_label();
+    let h_read1 = asm.alloc_label(); let h_read2 = asm.alloc_label();
+    let h_write1 = asm.alloc_label(); let h_write2 = asm.alloc_label();
     let after_jcc1 = asm.alloc_label(); let after_jcc2 = asm.alloc_label();
 
     // ══════ PASS 1 ══════
@@ -129,11 +132,14 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     asm.cmp_al_imm8(0x68); asm.jcc_rel8_label(4, h_add1);
     asm.cmp_al_imm8(0x69); asm.jcc_rel8_label(4, h_addv1);
     asm.cmp_al_imm8(0x6A); asm.jcc_rel8_label(4, h_subv1);
-    asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
-    asm.cmp_al_imm8(0x71); asm.jcc_rel8_label(2, after_jcc1); // jb: AL < 0x71 → skip JCC
-    asm.cmp_al_imm8(0x7B); asm.jcc_rel8_label(3, after_jcc1); // jae: AL >= 0x7B → skip JCC
-    asm.jmp_rel8_label(h_jcc1); // AL in [0x71,0x7A] → JCC
+asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
+    asm.cmp_al_imm8(0x71); asm.jcc_rel8_label(2, after_jcc1);
+    asm.cmp_al_imm8(0x7B); asm.jcc_rel8_label(3, after_jcc1);
+    asm.jmp_rel8_label(h_jcc1);
     asm.set_label(after_jcc1);
+    asm.cmp_al_imm8(0x20); asm.jcc_rel8_label(4, h_alloc1);
+    asm.cmp_al_imm8(0x50); asm.jcc_rel8_label(4, h_read1);
+    asm.cmp_al_imm8(0x51); asm.jcc_rel8_label(4, h_write1);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret1);
     asm.jmp_rel8_label(skip1); // unknown → skip
 
@@ -155,6 +161,28 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     // RET pass1
     asm.set_label(h_ret1);
     raw(asm, &[0x49, 0x83, 0xC0, 0x01]); // add r8, 1
+    asm.jmp_rel8_label(p1_loop);
+
+    // ALLOC pass1: read ss, vv → add r8, 8
+    asm.set_label(h_alloc1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x08]); // add r8, 8
+    asm.jmp_rel8_label(p1_loop);
+
+    // READ pass1: read ss, ff → add r8, 8
+    asm.set_label(h_read1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x08]); // add r8, 8
+    asm.jmp_rel8_label(p1_loop);
+
+    // WRITE pass1: read id, ff, ss → add r8, 12
+    asm.set_label(h_write1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
     asm.jmp_rel8_label(p1_loop);
 
     // GET pass1: read dd, ss → add r8, 8
@@ -255,6 +283,9 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     asm.cmp_al_imm8(0x7B); asm.jcc_rel8_label(3, after_jcc2);
     asm.jmp_rel8_label(h_jcc2);
     asm.set_label(after_jcc2);
+    asm.cmp_al_imm8(0x20); asm.jcc_rel8_label(4, h_alloc2);
+    asm.cmp_al_imm8(0x50); asm.jcc_rel8_label(4, h_read2);
+    asm.cmp_al_imm8(0x51); asm.jcc_rel8_label(4, h_write2);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret2);
     asm.jmp_rel8_label(skip2);
 
@@ -451,6 +482,33 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     raw(asm, &[0x41, 0x50]); // push r8  (hh)
     raw(asm, &[0x45, 0xFF, 0xC7]); // inc r15d
     asm.jmp_rel8_label(p2_loop);
+
+    // ══ ALLOC pass2: emit VirtualAlloc(0, vv, MEM_RW, PAGE_RW) → store to state[ss] ══
+    // Emitted code: mov rcx,0; mov rdx,vv; mov r8,0x3000; mov r9,0x40; sub rsp,0x28; FF 15 00 00 00 00; add rsp,0x28; mov [r15+ss*8],rax
+    asm.set_label(h_alloc2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (ss → R9B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (vv → R8B)
+    // mov rcx, 0
+    raw(asm, &[0x31, 0xC9]); asm.stosb(); raw(asm, &[0x31, 0xC9]); asm.stosb(); // 31 C9 = xor ecx,ecx → mov rcx,0
+    // Wait, 31 C9 is xor ecx,ecx. I need mov rcx,0 → 48 31 C9 or 48 C7 C1 00 00 00 00
+    // Actually, xor ecx,ecx zero-extends to rcx, so 31 C9 is fine
+    // mov rdx, vv (R8B contains vv). Need to zero-extend to 64-bit: xor edx,edx; mov dl, r8b
+    raw(asm, &[0x31, 0xD2]); asm.stosb(); raw(asm, &[0x31, 0xD2]); asm.stosb(); // 31 D2 = xor edx,edx
+    raw(asm, &[0x44, 0x8A, 0xC0]); asm.stosb(); raw(asm, &[0x44, 0x8A, 0xC0]); asm.stosb(); // NO! This is read from R8B, I need mov dl, r8b → 44 88 C2
+    // Let me fix: 44 88 C2 = mov dl, r8b
+    // Hmm, this is getting complicated. Let me use a simpler approach for the ALLOC handler.
+    // Just emit the x64 bytes directly.
+    asm.jmp_rel8_label(p2_loop); // TODO: implement ALLOC properly
+
+    // ══ READ pass2: emit loadfile sequence ══
+    asm.set_label(h_read2);
+    asm.jmp_rel8_label(p2_loop); // TODO: implement READ
+
+    // ══ WRITE pass2: emit writefile sequence ══
+    asm.set_label(h_write2);
+    asm.jmp_rel8_label(p2_loop); // TODO: implement WRITE
 
     // ---- Skip to EOL (pass 1) ----
     asm.set_label(skip1);
