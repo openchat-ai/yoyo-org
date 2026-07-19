@@ -25,6 +25,26 @@ fn hex_table() -> Vec<u8> {
 
 fn raw(asm: &mut X64Assembler, b: &[u8]) { asm.bytes.extend_from_slice(b); }
 
+/// Emit FF 15 <api_index> 00 00 00 into output buffer via stosb/stosd
+fn emit_ff15(asm: &mut X64Assembler, api_index: u8) {
+    raw(asm, &[0xB0, 0xFF]); asm.stosb();
+    raw(asm, &[0xB0, 0x15]); asm.stosb();
+    raw(asm, &[0x31, 0xC0]); // xor eax, eax
+    raw(asm, &[0xB0, api_index]); // mov al, api_index
+    asm.stosd(); // writes api_index,0,0,0 as 4-byte disp32
+}
+
+/// Emit mov qword [rsp+disp], imm32 into output buffer: 48 C7 44 24 <disp> <imm32>
+fn emit_stosq_rsp(asm: &mut X64Assembler, disp: u8, imm: u32) {
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); // REX.W
+    raw(asm, &[0xB0, 0xC7]); asm.stosb(); // MOV r/m64, imm32
+    raw(asm, &[0xB0, 0x44]); asm.stosb(); // ModRM: mod=01, reg=000, rm=100(SIB)
+    raw(asm, &[0xB0, 0x24]); asm.stosb(); // SIB: scale=0, index=100(none), base=100(RSP)
+    raw(asm, &[0xB0, disp]); asm.stosb(); // disp8
+    // imm32 via stosd
+    raw(asm, &[0xB8]); asm.emit_u32(imm); asm.stosd();
+}
+
 /// Emit call rel32 with compile-time computed displacement (no fixup entry).
 fn emit_direct_call(asm: &mut X64Assembler, target: usize) {
     let off = asm.bytes.len();
@@ -529,19 +549,170 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (ss → R9B, dest slot)
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ff → R8B, filename slot)
-    // TODO: emit full READ sequence (CreateFileA + GetFileSize + VirtualAlloc + ReadFile + CloseHandle)
+    // mov rcx, [r15+ff*8] (49 8B 4F <ff*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x4F]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC0]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r8b*8
+    // mov edx, 0x80000000 (BA 00 00 00 80)
+    raw(asm, &[0xB0, 0xBA]); asm.stosb(); raw(asm, &[0xB8]); asm.emit_u32(0x80000000); asm.stosd();
+    // mov r8d, 1 (41 B8 01 00 00 00)
+    raw(asm, &[0xB0, 0x41]); asm.stosb(); raw(asm, &[0xB0, 0xB8]); asm.stosb();
+    raw(asm, &[0xB8]); asm.emit_u32(1); asm.stosd();
+    // xor r9d, r9d (45 31 C9)
+    raw(asm, &[0xB0, 0x45]); asm.stosb(); raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb();
+    // CreateFileA: sub rsp,0x48; mov [rsp+0x20],3; mov [rsp+0x28],0x80; mov [rsp+0x30],0; FF 15 01 00 00 00; add rsp,0x48
+    // sub rsp, 0x48 (48 83 EC 48)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x48]); asm.stosb();
+    // mov qword [rsp+0x20], 3: 48 C7 44 24 20 03 00 00 00
+    emit_stosq_rsp(asm, 0x20, 3);
+    // mov qword [rsp+0x28], 0x80: 48 C7 44 24 28 80 00 00 00
+    emit_stosq_rsp(asm, 0x28, 0x80);
+    // mov qword [rsp+0x30], 0: 48 C7 44 24 30 00 00 00 00
+    emit_stosq_rsp(asm, 0x30, 0);
+    // FF 15 01 00 00 00 (CreateFileA IAT thunk, api_index=1)
+    emit_ff15(asm, 1);
+    // add rsp, 0x48 (48 83 C4 48)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x48]); asm.stosb();
+    // mov r12, rax (4C 89 E0) — save hFile
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE0]); asm.stosb();
+    // GetFileSize: mov rcx,r12; xor edx,edx; sub rsp,0x20; FF 15 02 00 00 00; add rsp,0x20
+    // mov rcx, r12 (4C 89 E1)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE1]); asm.stosb();
+    // xor edx, edx (31 D2)
+    raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xD2]); asm.stosb();
+    // sub rsp, 0x20 (48 83 EC 20)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    // FF 15 02 00 00 00 (GetFileSize IAT thunk)
+    emit_ff15(asm, 2);
+    // add rsp, 0x20 (48 83 C4 20)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    // mov r13, rax (4C 89 E8) — save fileSize
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE8]); asm.stosb();
+    // VirtualAlloc: xor ecx,ecx; mov rdx,r13; mov r8d,0x3000; mov r9d,0x40; sub rsp,0x20; FF 15 00 00 00 00; add rsp,0x20
+    // xor ecx, ecx (31 C9)
+    raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb();
+    // mov rdx, r13 (4C 89 EA)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xEA]); asm.stosb();
+    // mov r8d, 0x3000 (41 B8 00 30 00 00)
+    raw(asm, &[0xB0, 0x41]); asm.stosb(); raw(asm, &[0xB0, 0xB8]); asm.stosb();
+    raw(asm, &[0xB8]); asm.emit_u32(0x3000); asm.stosd();
+    // mov r9d, 0x40 (41 B9 40 00 00 00)
+    raw(asm, &[0xB0, 0x41]); asm.stosb(); raw(asm, &[0xB0, 0xB9]); asm.stosb();
+    raw(asm, &[0xB8]); asm.emit_u32(0x40); asm.stosd();
+    // sub rsp, 0x20 (48 83 EC 20)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    // FF 15 00 00 00 00 (VirtualAlloc IAT thunk)
+    emit_ff15(asm, 0);
+    // add rsp, 0x20 (48 83 C4 20)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    // mov r14, rax (4C 89 F0) — save buffer
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xF0]); asm.stosb();
+    // ReadFile: mov rcx,r12; mov rdx,r14; mov r8,r13; xor r9d,r9d; sub rsp,0x30; mov [rsp+0x28],0; FF 15 03; add rsp,0x30
+    // mov rcx, r12 (4C 89 E1)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE1]); asm.stosb();
+    // mov rdx, r14 (4C 89 F2)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xF2]); asm.stosb();
+    // mov r8, r13 (4D 89 E8)
+    raw(asm, &[0xB0, 0x4D]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE8]); asm.stosb();
+    // xor r9d, r9d (45 31 C9)
+    raw(asm, &[0xB0, 0x45]); asm.stosb(); raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb();
+    // sub rsp, 0x30 (48 83 EC 30)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x30]); asm.stosb();
+    // mov qword [rsp+0x28], 0
+    emit_stosq_rsp(asm, 0x28, 0);
+    // FF 15 03 00 00 00 (ReadFile IAT thunk)
+    emit_ff15(asm, 3);
+    // add rsp, 0x30 (48 83 C4 30)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x30]); asm.stosb();
+    // CloseHandle: mov rcx,r12; sub rsp,0x20; FF 15 05; add rsp,0x20
+    // mov rcx, r12 (4C 89 E1)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE1]); asm.stosb();
+    // sub rsp, 0x20 (48 83 EC 20)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    // FF 15 05 00 00 00 (CloseHandle IAT thunk)
+    emit_ff15(asm, 5);
+    // add rsp, 0x20 (48 83 C4 20)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    // Store buffer to state[ss], size to state[ss+1]
+    // mov [r15+ss*8], r14 (4D 89 77 <ss*8>)
+    raw(asm, &[0xB0, 0x4D]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb();
+    raw(asm, &[0xB0, 0x77]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8
+    // mov [r15+ss*8+8], r13 (4D 89 6F <(ss+1)*8>)
+    raw(asm, &[0xB0, 0x4D]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb();
+    raw(asm, &[0xB0, 0x6F]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); // al = r9b*8
+    raw(asm, &[0x04, 0x08]); // add al, 8 (disp8 + 8 for next slot)
+    asm.stosb();
     asm.jmp_rel8_label(p2_loop);
 
     // ══ WRITE pass2: emit writefile sequence ══
     // Emitted: load state[ff]→RCX; CreateFileA; WriteFile(state[id], state[ss]); CloseHandle
     asm.set_label(h_write2);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
-    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (id → R9B)
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (id → R9B, data slot)
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ff → R8B, filename slot)
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC3]); // mov r11b, al (ss → R11B, size slot)
-    // TODO: emit full WRITE sequence (CreateFileA + WriteFile + CloseHandle)
+    // mov rcx, [r15+ff*8] (49 8B 4F <ff*8>) — load filename
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x4F]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC0]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r8b*8
+    // mov edx, 0x40000000 (BA 00 00 00 40) — GENERIC_WRITE
+    raw(asm, &[0xB0, 0xBA]); asm.stosb(); raw(asm, &[0xB8]); asm.emit_u32(0x40000000); asm.stosd();
+    // xor r8d, r8d (45 31 C0)
+    raw(asm, &[0xB0, 0x45]); asm.stosb(); raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC0]); asm.stosb();
+    // xor r9d, r9d (45 31 C9)
+    raw(asm, &[0xB0, 0x45]); asm.stosb(); raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb();
+    // CreateFileA: sub rsp,0x48; mov [rsp+0x20],2; mov [rsp+0x28],0; mov [rsp+0x30],0; FF 15 01; add rsp,0x48
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x48]); asm.stosb();
+    emit_stosq_rsp(asm, 0x20, 2); // CREATE_ALWAYS
+    emit_stosq_rsp(asm, 0x28, 0);
+    emit_stosq_rsp(asm, 0x30, 0);
+    emit_ff15(asm, 1); // CreateFileA
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x48]); asm.stosb();
+    // mov r12, rax (4C 89 E0) — save hFile
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE0]); asm.stosb();
+    // WriteFile: mov rcx,r12; mov rdx,state[id]; mov r8,state[ss]; xor r9d,r9d; sub rsp,0x30; mov [rsp+0x28],0; FF 15 04; add rsp,0x30
+    // mov rcx, r12 (4C 89 E1)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE1]); asm.stosb();
+    // mov rdx, [r15+id*8] (49 8B 57 <id*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x57]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8 (id)
+    // mov r8, [r15+ss*8] (4D 8B 47 <ss*8>)
+    raw(asm, &[0xB0, 0x4D]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC3]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r11b*8 (ss)
+    // xor r9d, r9d (45 31 C9)
+    raw(asm, &[0xB0, 0x45]); asm.stosb(); raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb();
+    // sub rsp, 0x30 (48 83 EC 30)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x30]); asm.stosb();
+    emit_stosq_rsp(asm, 0x28, 0);
+    emit_ff15(asm, 4); // WriteFile
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x30]); asm.stosb();
+    // CloseHandle: mov rcx,r12; sub rsp,0x20; FF 15 05; add rsp,0x20
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xE1]); asm.stosb();
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xEC]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    emit_ff15(asm, 5); // CloseHandle
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
+    raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
     asm.jmp_rel8_label(p2_loop);
 
     // ---- Skip to EOL (pass 1) ----
