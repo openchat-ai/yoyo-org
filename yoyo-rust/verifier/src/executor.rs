@@ -135,6 +135,11 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     let h_alloc1 = asm.alloc_label(); let h_alloc2 = asm.alloc_label();
     let h_read1 = asm.alloc_label(); let h_read2 = asm.alloc_label();
     let h_write1 = asm.alloc_label(); let h_write2 = asm.alloc_label();
+    let h_imul1 = asm.alloc_label(); let h_imul2 = asm.alloc_label();
+    let h_ldb1 = asm.alloc_label(); let h_ldb2 = asm.alloc_label();
+    let h_mcpd1 = asm.alloc_label(); let h_mcpd2 = asm.alloc_label();
+    let h_mcps1 = asm.alloc_label(); let h_mcps2 = asm.alloc_label();
+    let h_raw1 = asm.alloc_label(); let h_raw2 = asm.alloc_label();
     let after_jcc1 = asm.alloc_label(); let after_jcc2 = asm.alloc_label();
 
     // ══════ PASS 1 ══════
@@ -160,6 +165,11 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     asm.cmp_al_imm8(0x20); asm.jcc_rel8_label(4, h_alloc1);
     asm.cmp_al_imm8(0x50); asm.jcc_rel8_label(4, h_read1);
     asm.cmp_al_imm8(0x51); asm.jcc_rel8_label(4, h_write1);
+    asm.cmp_al_imm8(0x63); asm.jcc_rel8_label(4, h_imul1);
+    asm.cmp_al_imm8(0x80); asm.jcc_rel8_label(4, h_ldb1);
+    asm.cmp_al_imm8(0x84); asm.jcc_rel8_label(4, h_mcpd1);
+    asm.cmp_al_imm8(0x85); asm.jcc_rel8_label(4, h_mcps1);
+    asm.cmp_al_imm8(0xA0); asm.jcc_rel8_label(4, h_raw1);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret1);
     asm.jmp_rel8_label(skip1); // unknown → skip
 
@@ -203,6 +213,43 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
     raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
+    asm.jmp_rel8_label(p1_loop);
+
+    // IMUL pass1: read a, b → add r8, 8
+    asm.set_label(h_imul1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x08]); // add r8, 8
+    asm.jmp_rel8_label(p1_loop);
+
+    // LDB pass1: read dd, ss, oo → add r8, 12
+    asm.set_label(h_ldb1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
+    asm.jmp_rel8_label(p1_loop);
+
+    // MEMCPY_DATA pass1: read dd, ss, ll → add r8, 12
+    asm.set_label(h_mcpd1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
+    asm.jmp_rel8_label(p1_loop);
+
+    // MEMCPY_STATE pass1: same as MEMCPY_DATA
+    asm.set_label(h_mcps1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
+    asm.jmp_rel8_label(p1_loop);
+
+    // RAW_BYTE pass1: read byte → add r8, 4
+    asm.set_label(h_raw1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x04]); // add r8, 4
     asm.jmp_rel8_label(p1_loop);
 
     // GET pass1: read dd, ss → add r8, 8
@@ -306,6 +353,11 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     asm.cmp_al_imm8(0x20); asm.jcc_rel8_label(4, h_alloc2);
     asm.cmp_al_imm8(0x50); asm.jcc_rel8_label(4, h_read2);
     asm.cmp_al_imm8(0x51); asm.jcc_rel8_label(4, h_write2);
+    asm.cmp_al_imm8(0x63); asm.jcc_rel8_label(4, h_imul2);
+    asm.cmp_al_imm8(0x80); asm.jcc_rel8_label(4, h_ldb2);
+    asm.cmp_al_imm8(0x84); asm.jcc_rel8_label(4, h_mcpd2);
+    asm.cmp_al_imm8(0x85); asm.jcc_rel8_label(4, h_mcps2);
+    asm.cmp_al_imm8(0xA0); asm.jcc_rel8_label(4, h_raw2);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret2);
     asm.jmp_rel8_label(skip2);
 
@@ -713,6 +765,97 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     emit_ff15(asm, 5); // CloseHandle
     raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x83]); asm.stosb();
     raw(asm, &[0xB0, 0xC4]); asm.stosb(); raw(asm, &[0xB0, 0x20]); asm.stosb();
+    asm.jmp_rel8_label(p2_loop);
+
+    // ══ IMUL pass2: emit 49 8B 47 <a*8> 49 8B 57 <b*8> 48 0F AF C2 49 89 47 <a*8> ══
+    // state[a] *= state[b]
+    asm.set_label(h_imul2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (a → R9B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (b → R8B)
+    // mov rax, [r15+a*8] (49 8B 47 <a*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8
+    // mov rdx, [r15+b*8] (49 8B 57 <b*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x57]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC0]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r8b*8
+    // imul rax, rdx (48 0F AF C2)
+    raw(asm, &[0xB0, 0x48]); asm.stosb(); raw(asm, &[0xB0, 0x0F]); asm.stosb();
+    raw(asm, &[0xB0, 0xAF]); asm.stosb(); raw(asm, &[0xB0, 0xC2]); asm.stosb();
+    // mov [r15+a*8], rax (49 89 47 <a*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8
+    asm.jmp_rel8_label(p2_loop);
+
+    // ══ LDB pass2: emit 49 8B 57 <ss*8> 0F B6 42 <oo> 49 89 47 <dd*8> ══
+    // state[dd] = zero_extend(byte[state[ss] + oo])
+    asm.set_label(h_ldb2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (dd → R9B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ss → R8B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC3]); // mov r11b, al (oo → R11B)
+    // mov rdx, [r15+ss*8] (49 8B 57 <ss*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x57]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC0]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r8b*8
+    // movzx eax, byte [rdx+oo] (0F B6 42 <oo>)
+    raw(asm, &[0xB0, 0x0F]); asm.stosb(); raw(asm, &[0xB0, 0xB6]); asm.stosb();
+    raw(asm, &[0xB0, 0x42]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC3]); asm.stosb(); // mov al, r11b (oo as disp8)
+    // mov [r15+dd*8], rax (49 89 47 <dd*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb();
+    raw(asm, &[0xB0, 0x47]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8
+    asm.jmp_rel8_label(p2_loop);
+
+    // ══ MEMCPY_DATA pass2: emit data inline + rep movsb ══
+    // Copy from embedded data at data_lbl to state[dd], ll bytes
+    asm.set_label(h_mcpd2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (dd → R9B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ss → R8B, unused but read)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC3]); // mov r11b, al (ll → R11B)
+    // TODO: MEMCPY_DATA needs to embed data inline. Simplified: just advance RDI (no-op for now)
+    asm.jmp_rel8_label(p2_loop);
+
+    // ══ MEMCPY_STATE pass2: emit 49 8B 77 <ss*8> 49 8B 7F <dd*8> 49 C7 C1 <ll> F3 A4 ══
+    // Copy ll bytes from state[ss] to state[dd]
+    asm.set_label(h_mcps2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (dd → R9B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ss → R8B)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    raw(asm, &[0x41, 0x88, 0xC3]); // mov r11b, al (ll → R11B)
+    // mov rsi, [r15+ss*8] (49 8B 77 <ss*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x77]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC0]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r8b*8
+    // mov rdi, [r15+dd*8] (49 8B 7F <dd*8>)
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x7F]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8
+    // mov rcx, ll (49 C7 C1 <ll> 00 00 00) — but ll is a byte, so use mov cl, r11b
+    // xor ecx, ecx; mov cl, r11b (31 C9 44 88 D9)
+    raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb(); // xor ecx,ecx
+    raw(asm, &[0xB0, 0x44]); asm.stosb(); raw(asm, &[0xB0, 0x88]); asm.stosb(); raw(asm, &[0xB0, 0xD9]); asm.stosb(); // mov cl, r11b
+    // rep movsb (F3 A4)
+    raw(asm, &[0xB0, 0xF3]); asm.stosb(); raw(asm, &[0xB0, 0xA4]); asm.stosb();
+    asm.jmp_rel8_label(p2_loop);
+
+    // ══ RAW_BYTE pass2: emit the byte directly via stosb ══
+    asm.set_label(h_raw2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    // AL contains the byte value. Just emit via stosb.
+    asm.stosb();
     asm.jmp_rel8_label(p2_loop);
 
     // ---- Skip to EOL (pass 1) ----
