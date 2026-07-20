@@ -217,11 +217,11 @@ asm.cmp_al_imm8(0x61); asm.jcc_rel8_label(4, h_add1);
     raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
     asm.jmp_rel8_label(p1_loop);
 
-    // IMUL pass1: read a, b → add r8, 8
+    // IMUL pass1: read a, b → add r8, 16 (emits 16 bytes)
     asm.set_label(h_imul1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
-    raw(asm, &[0x49, 0x83, 0xC0, 0x08]); // add r8, 8
+    raw(asm, &[0x49, 0x83, 0xC0, 0x10]); // add r8, 16
     asm.jmp_rel8_label(p1_loop);
 
     // LDB pass1: read dd, ss, oo → add r8, 12
@@ -245,19 +245,19 @@ asm.cmp_al_imm8(0x61); asm.jcc_rel8_label(4, h_add1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
-    raw(asm, &[0x49, 0x83, 0xC0, 0x0C]); // add r8, 12
+    raw(asm, &[0x49, 0x83, 0xC0, 0x10]); // add r8, 16 (emits ~16 bytes)
     asm.jmp_rel8_label(p1_loop);
 
-    // RAW_BYTE pass1: read byte → add r8, 4
+    // RAW_BYTE pass1: read byte → add r8, 1 (emits 1 byte)
     asm.set_label(h_raw1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
-    raw(asm, &[0x49, 0x83, 0xC0, 0x04]); // add r8, 4
+    raw(asm, &[0x49, 0x83, 0xC0, 0x01]); // add r8, 1
     asm.jmp_rel8_label(p1_loop);
 
-    // RAW_BYTES pass1: read 1 byte → add r8, 4 (skip, variable-length handled by prefix_read)
+    // RAW_BYTES pass1: read 1 byte → add r8, 1 (emits 1 byte)
     asm.set_label(h_rawb1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
-    raw(asm, &[0x49, 0x83, 0xC0, 0x04]); // add r8, 4
+    raw(asm, &[0x49, 0x83, 0xC0, 0x01]); // add r8, 1
     asm.jmp_rel8_label(p1_loop);
 
     // GET pass1: read dd, ss → add r8, 8
