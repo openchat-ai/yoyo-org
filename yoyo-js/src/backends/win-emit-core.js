@@ -371,11 +371,12 @@ function createWinEmitContext(prog, opts = {}) {
     }
   }
 
-  function emitStartup() {
+  // firstHandler is the numeric ID of the first handler to call in the startup stub.
+  function emitStartup(firstHandler) {
     // V3-compatible startup stub: stack-based state, call generated code, ExitProcess
     E.sub_ri(code, RSP, 0x1008);
     E.lea_rr(code, R15, RSP, 0x808);
-    E.call_rel(code, 0); code.fixups.push({ p: code.tell() - 4, n: 'H00' });
+    E.call_rel(code, 0); code.fixups.push({ p: code.tell() - 4, n: 'H' + firstHandler });
     E.add_ri(code, RSP, 0x1008);
     code.u8(0x31); code.u8(0xC9); // xor ecx,ecx (32-bit, matches V3)
     // Direct IAT call to ExitProcess (no shadow space, matching V3)
@@ -467,7 +468,7 @@ function handlerOrderFromProg(prog, opts = {}) {
 function extractWinHandlerSlices(prog, opts = {}) {
   const ctx = createWinEmitContext(prog, opts);
   const order = handlerOrderFromProg(prog, opts);
-  ctx.emitStartup();
+  ctx.emitStartup(order[0]);
   for (const op of prog.top || []) ctx.emit(op);
   ctx.emitExit();
   for (const h of order) {
@@ -533,10 +534,10 @@ function extractTirHandlerSlices(mod, opts = {}) {
 
 function compileFromAnalyzed(prog, opts = {}) {
   const ctx = createWinEmitContext(prog, opts);
-  ctx.emitStartup();
+  const order = handlerOrderFromProg(prog, opts);
+  ctx.emitStartup(order[0]);
   for (const op of prog.top) ctx.emit(op);
   ctx.emitExit();
-  const order = handlerOrderFromProg(prog, opts);
   for (const h of order) {
     const ops = prog.handlers[h] ?? prog.handlers[String(h)];
     if (!ops) continue;
@@ -551,7 +552,10 @@ const Op = require('../tir/ops.js').Op;
 function compileFromTirModule(mod, opts = {}) {
   const prog = { strings: mod.strings || {}, blobs: mod.blobs || [], top: [], handlers: {} };
   const ctx = createWinEmitContext(prog, opts);
-  ctx.emitStartup();
+  const order = opts.handlerOrder === 'file'
+    ? (mod.handlerOrder || [])
+    : [...(mod.handlerOrder || [])].sort((a, b) => a - b);
+  ctx.emitStartup(order[0]);
 
   const topFn = mod.functions.find(f => f.name === '__top');
   if (topFn) {
@@ -564,10 +568,6 @@ function compileFromTirModule(mod, opts = {}) {
     }
   }
   ctx.emitExit();
-
-  const order = opts.handlerOrder === 'file'
-    ? (mod.handlerOrder || [])
-    : [...(mod.handlerOrder || [])].sort((a, b) => a - b);
 
   for (const hh of order) {
     const fn = mod.functions.find(f => f.name === 'H' + hh.toString(16));

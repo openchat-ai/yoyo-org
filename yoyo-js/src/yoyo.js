@@ -39,14 +39,17 @@ function parse(text){
       p=[String(op),...p];
     }else{
       // v3 Part 4.1: 24-bit encoding per opcode. byte[0]=hi, byte[1]=mid, byte[2]=lo.
-      // 38 active opcodes fit in the low byte; hi=mid=0 required.
-      if(p.length<3)throw new CompileError(`line ${line}: 24-bit opcode requires 3 bytes (got ${p.length}); per v3 Part 4.1`);
-      const hi=parseInt(p[0],16), mid=parseInt(p[1],16), lo=parseInt(p[2],16);
-      if(isNaN(hi)||isNaN(mid)||isNaN(lo))throw new CompileError(`line ${line}: invalid 24-bit opcode bytes "${p[0]} ${p[1]} ${p[2]}"`);
-      if(hi!==0||mid!==0)throw new CompileError(`line ${line}: 24-bit opcode must be 0x00 in high/mid bytes (only low byte carries opcode); got ${p[0]} ${p[1]} ${p[2]}`);
-      op=lo;
-      p=p.slice(3);
-      p=[String(op),...p];
+      // Accept both 2-token legacy (opcode arg...) and 3-token 24-bit (00 00 opcode arg...).
+      if(p.length>=3&&p[0]==='00'&&p[1]==='00'&&/^[0-9a-fA-F]{1,2}$/.test(p[2])){
+        op=parseInt(p[2],16);
+        p=p.slice(3);
+        p=[String(op),...p];
+      }else{
+        op=parseInt(p[0],16);
+        if(isNaN(op))throw new CompileError(`line ${line}: invalid opcode "${p[0]}"`);
+        p=p.slice(1);
+        p=[String(op),...p];
+      }
     }
     if(!KNOWN_OPS.has(op)&&op!==0x12&&op!==0x13){
       const bytes=[];
