@@ -94,6 +94,22 @@ function createWinEmitContext(prog, opts = {}) {
   function stAdd(id, v) { stGet(RAX, id); E.add_ri(code, RAX, v); stPut(id, RAX); }
   function stSub(id, v) { stGet(RAX, id); E.sub_ri(code, RAX, v); stPut(id, RAX); }
   function stCmp(a, b) { stGet(RAX, a); stGet(RDX, b); E.cmp_rr(code, RAX, RDX); }
+  // V3-compatible memory operations
+  function stAddV(a, b) {
+    // 49 8B 47 <b*8> 49 01 47 <a*8> (8 bytes) — state[a] += state[b]
+    code.u8(0x49); code.u8(0x8B); code.u8(0x47); code.u8(b * 8);
+    code.u8(0x49); code.u8(0x01); code.u8(0x47); code.u8(a * 8);
+  }
+  function stSubV(a, b) {
+    // 49 8B 47 <b*8> 49 29 47 <a*8> (8 bytes) — state[a] -= state[b]
+    code.u8(0x49); code.u8(0x8B); code.u8(0x47); code.u8(b * 8);
+    code.u8(0x49); code.u8(0x29); code.u8(0x47); code.u8(a * 8);
+  }
+  function stCmpMem(a, b) {
+    // 49 8B 47 <a*8> 49 3B 47 <b*8> (8 bytes) — cmp rax, [r15+b*8]
+    code.u8(0x49); code.u8(0x8B); code.u8(0x47); code.u8(a * 8);
+    code.u8(0x49); code.u8(0x3B); code.u8(0x47); code.u8(b * 8);
+  }
 
   function emitLoadFile(stateSlot, strId) {
     ld(RCX, strPos[strId] + 4);
@@ -203,11 +219,12 @@ function createWinEmitContext(prog, opts = {}) {
     else if (o === 0x61) stAdd(a[0].v, a[1].v);
     else if (o === 0x62) stSub(a[0].v, a[1].v);
     else if (o === 0x63) { stGet(RAX, a[0].v); stGet(RDX, a[1].v); E.imul_rr(code, RAX, RDX); stPut(a[0].v, RAX); }
+    else if (o === 0x65) stCmpMem(a[0].v, a[1].v);
     else if (o === 0x66) { stInc(a[0].v); }
     else if (o === 0x67) { stDec(a[0].v); }
-    else if (o === 0x68) { stGet(RAX, a[0].v); stGet(RDX, a[1].v); E.add_rr(code, RAX, RDX); stPut(a[0].v, RAX); }
-    else if (o === 0x69) { stGet(RAX, a[0].v); stGet(RDX, a[1].v); E.sub_rr(code, RAX, RDX); stPut(a[0].v, RAX); }
-    else if (o === 0x65) stCmp(a[0].v, a[1].v);
+    else if (o === 0x68) stAddV(a[0].v, a[1].v);
+    else if (o === 0x69) stSubV(a[0].v, a[1].v);
+    else if (o === 0x6A) stAddV(a[0].v, a[1].v); // ADDV (same as ADD)
     else if (o === 0x70) code.jmp32('H' + a[0].v);
     else if (o === 0x71) code.jcc32(0, 'H' + a[0].v);
     else if (o === 0x72) code.jcc32(1, 'H' + a[0].v);
