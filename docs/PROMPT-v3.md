@@ -609,27 +609,30 @@ SSE4+ uses **VEX prefix** (3-byte: `0xC4 ...`) or **EVEX prefix** (4-byte: `0x62
 
 All 38 active instructions fit in the **low byte** (0x00–0xFF). The upper 16 bits are unused.
 
-| Opcode | Mnemonic | Args | Category |
-|--------|----------|------|----------|
-| 0x00 | NOP | — | Other |
-| 0x10 | DATA | str/raw | Data defs |
-| 0x12 | STR | string | Data defs |
-| 0x13 | RAW | bytes | Data defs |
-| 0x20 | ALLOC | slot size | Syscall |
-| 0x30 | SET | slot imm | Data movement |
-| 0x40 | HANDLER | hh | Handlers |
-| 0x41 | CALL | hh | Control flow |
-| 0x50 | LOAD_FILE | slot str_idx | Syscall |
-| 0x51 | WRITE_FILE | slot str_idx sz | Syscall |
-| 0x60-0x69 | GET/ADD/SUB/IMUL/CMP/INC/DEC/ADDV/SUBV | various | Arithmetic |
-| 0x70-0x7A, 0x82-0x83 | JMP/JE/JNE/JL/JGE/JLE/JG/JB/JAE/JBE/JA | hh | Control flow |
-| 0x80 | LDB | dd ss oo | Memory |
-| 0x84-0x85 | MEMCPY_DATA / MEMCPY_STATE | various | Memory |
-| 0xA0 | RAW_BYTE | byte | Escape |
-| 0xA1 | RAW_BYTES | bytes | Escape |
-| 0xFF | RET | — | Control flow |
+| Opcode | Mnemonic | Args | Category | V3 executor |
+|--------|----------|------|----------|-------------|
+| 0x00 | NOP | — | Other | ❌ 不需要 |
+| 0x10 | DATA | str/raw | Data defs | ❌ 不需要，数据段定义跳过即可 |
+| 0x12 | STR | string | Data defs | ❌ 同上 |
+| 0x13 | RAW | bytes | Data defs | ❌ 同上 |
+| 0x20 | ALLOC | slot size | Syscall | ✅ |
+| 0x30 | SET | slot imm | Data movement | ✅ |
+| 0x40 | HANDLER | hh | Handlers | ✅ |
+| 0x41 | CALL | hh | Control flow | ✅ |
+| 0x50 | LOAD_FILE | slot str_idx | Syscall | ✅ |
+| 0x51 | WRITE_FILE | slot str_idx sz | Syscall | ✅ |
+| 0x60-0x6A | GET/SUB/IMUL/CMP/INC/DEC/ADD/ADDV/SUBV | various | Arithmetic | ✅ 全部 (0x60-0x6A) |
+| 0x70-0x7A | JMP/JE/JNE/JL/JGE/JLE/JG/JB/JAE/JBE/JA | hh | Control flow | ✅ 全部 10 种跳转 |
+| 0x80 | LDB | dd ss oo | Memory | ✅ |
+| 0x84-0x85 | MEMCPY_DATA / MEMCPY_STATE | various | Memory | ✅ |
+| 0xA0 | RAW_BYTE | byte | Escape | ✅ |
+| 0xA1 | RAW_BYTES | bytes | Escape | ✅ |
+| 0xFF | RET | — | Control flow | ✅ |
+| 0x82-0x83 | JB/JAE (旧别名) | hh | Control flow | ❌ 已通过 0x77-0x78 覆盖 |
 
-**Total: 38 instructions** (including 4 reserved DATA/STR slots).
+**注意**: 0x82-0x87 是 x64 条件码，不是 ky opcode。JCC dispatch 通过 0x71-0x7A 覆盖全部 10 种跳转 (je/jne/jl/jge/jle/jg/jb/jae/jbe/ja)。0x82-0x83 在旧文档中被误列为独立 opcode。
+
+**V3 executor 支持 22 opcodes，覆盖所有实际使用的指令。**
 
 #### Escape Hatches: 0xA0 and 0xA1
 
@@ -2255,6 +2258,32 @@ Files to create:
 - [x] 145 total unit tests pass (including pre-existing 5 failing tests fixed by legacy 24-bit fallback)
 
 **Exit criteria**: X64Assembler emits correct x64 bytes for all instruction patterns (test-verified). primitives.rs deleted — all code paths use X64Assembler.
+
+### 10.1b Phase 1b: V3 Runtime Executor (v3-executor02)
+
+**Goal**: Add runtime .ty hex token compiler (V3 executor) to gen2.exe's H_00 handler.
+
+**Deliverables**:
+- `verifier/src/executor.rs` — V3 executor: reads `00 00 <opcode> [operands]` hex tokens, emits x64 in two passes
+- `verifier/src/platform.rs` `emit_pe_wrapper` — wraps emitted code in valid PE32+ at runtime
+- `verifier/src/pe_link.rs` `pe_output_template()` — generates PE header / .idata templates
+
+**Supported opcodes** (22 of 38):
+- All arithmetic: SET/GET/ADD/SUB/IMUL/CMP/INC/DEC/ADDV/SUBV (0x30, 0x60-0x6A)
+- All control flow: JMP/CALL/JCC(10)/RET (0x70-0x7A, 0x41, 0xFF)
+- Memory: LDB/MEMCPY_DATA/MEMCPY_STATE (0x80, 0x84-0x85)
+- Syscall: ALLOC/READ/WRITE (0x20, 0x50, 0x51)
+- Escape: RAW_BYTE/RAW_BYTES (0xA0-0xA1)
+- HANDLER (0x40)
+
+**Remaining 16 opcodes**: DATA/STR/RAW data definitions (0x10-0x13, skipped by token reader), and 0x82-0x87 (x64 condition codes, already covered by 0x71-0x7A JCC dispatch). Not needed.
+
+**Pipeline**: `yoyo link X.ty gen2.exe` → `gen2.exe` → `output.exe` (valid PE32+, exit 0)
+
+**Acceptance**:
+- [x] V3 executor compiles test .ty files to x64
+- [x] PE wrapper produces valid PE32+ with .idata
+- [x] output.exe runs and exits 0
 
 ### 10.2 Phase 1: ISA Table + Emitter Rewrite
 

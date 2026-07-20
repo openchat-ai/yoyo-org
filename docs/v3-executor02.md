@@ -1,17 +1,22 @@
 # v3-executor02: 24-bit TIR Executor (gen2.exe H_00)
 
-## Status
+## Status — ✅ 完成 (2026-07-19)
 
-| 阶段 | 计划 | 实际 |
-|------|------|------|
-| Scanner | scan_token 式 (产 token 边界) | sw+rh 子程序 (单字节级) |
-| Hex 表 | 256B, 编译时嵌入 | ✅ hex_table() + xlatb 替换 (2026-07-18: `movzx eax,al; movzx rdx,[rbx+rax]; mov al,dl`) |
-| Opcode handler | 14 个 | 3 个 (SET=0x30, HANDLER=0x40, RET=0xFF) |
-| 算术 opcode | GET/ADD/SUB/CMP/INC/DEC/ADDV/SUBV | ❌ 未实现 |
-| 分支 opcode | CALL/JMP+10 JCC | ❌ 未实现 (rel32 fixup 未集成) |
-| Fixup 表 | 两遍+写 rel32 | ❌ 无 |
-| PE 输出 | 完整 PE 构建 | ❌ 直接写原始字节 |
-| 输入输出 | LoadFile → V3 exec → WriteFile | ✅ pass-through + V3 executor 链路完整 |
+| 模块 | 状态 |
+|------|------|
+| Scanner (sw+rh 子程序) | ✅ |
+| Hex 表 (xlatb 替换) | ✅ |
+| 两遍处理 (pass1 记录 handler offset, pass2 发射) | ✅ |
+| 算术 opcode (SET/GET/ADD/SUB/IMUL/CMP/INC/DEC/ADDV/SUBV) | ✅ 全部 |
+| 分支 opcode (JMP/CALL/10 JCC + rel32 fixup) | ✅ |
+| I/O opcode (ALLOC/READ/WRITE via IAT thunks) | ✅ |
+| 内存 opcode (LDB/MEMCPY_DATA/MEMCPY_STATE) | ✅ |
+| Escape opcode (RAW_BYTE/RAW_BYTES) | ✅ |
+| PE wrapper (emit_pe_wrapper) | ✅ 完整 PE32+ 打包 |
+| IAT 修补 (运行时扫描 FF 15 模式) | ✅ |
+| 全链路 (gen2.exe → output.exe) | ✅ exit 0 |
+
+**支持 22 opcodes，覆盖所有实际使用的指令。**
 
 ## 已实现技术点
 
