@@ -949,7 +949,7 @@ asm.cmp_al_imm8(0x61); asm.jcc_rel8_label(4, h_add1);
     raw(asm, &[0x41, 0x89, 0x00]); // mov [r8], eax  (patch)
 
     raw(asm, &[0x45, 0xFF, 0xCF]); // dec r15d
-    raw(asm, &[0x75, 0xD4]); // jnz fixup_loop (rel8 back, ~44 bytes)
+    asm.jcc_rel8_label(5, fixup_loop); // jnz fixup_loop
 
     asm.set_label(after_fixup);
     // Output code base and size
