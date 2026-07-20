@@ -1,0 +1,16 @@
+﻿[workspace]
+resolver = "2"
+members = [
+    "verifier",
+    "isa-proc",
+    "libyoyo",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,132 @@
+; Test: copy cmdline to stack, then LOADFILE
+; If copy works, argv[1] is at rsp+0x900 (null-terminated if H_50 works correctly)
+00 00 40 00
+
+; Save callee-saved
+00 00 A0 41
+00 00 A0 54
+00 00 A0 41
+00 00 A0 55
+00 00 A0 41
+00 00 A0 56
+00 00 A0 53
+
+; sub rsp, 0x1000
+00 00 A0 48
+00 00 A0 81
+00 00 A0 EC
+00 00 A0 00
+00 00 A0 10
+00 00 A0 00
+00 00 A0 00
+
+; mov rsi, [rdi] (PSTR cmdline)
+00 00 A0 48
+00 00 A0 8B
+00 00 A0 37
+
+; Copy cmdline to stack: lea rdi, [rsp+0x900]
+00 00 A0 48
+00 00 A0 8D
+00 00 A0 BC
+00 00 A0 24
+00 00 A0 00
+00 00 A0 09
+00 00 A0 00
+00 00 A0 00
+
+; mov ecx, 0x400
+00 00 A0 B9
+00 00 A0 00
+00 00 A0 04
+00 00 A0 00
+00 00 A0 00
+
+; rep movsb (copies rcx=0x400 bytes from rsi to rdi, advances both)
+00 00 A0 F3
+00 00 A0 A4
+
+; After rep: rdi = rsp+0x900+0x400. Set rsi = rsp+0x900 (start of stack copy)
+00 00 A0 48
+00 00 A0 8D
+00 00 A0 B4
+00 00 A0 24
+00 00 A0 00
+00 00 A0 09
+00 00 A0 00
+00 00 A0 00
+
+; Now rsi = rsp+0x900 (start of stack copy).
+; But argv[1] has space inside, so we need null-terminate at the space.
+; Find space: scan rsi for 0x20, replace with 0x00
+; Simple: scan 100 bytes, set 0x00 at first space found.
+
+; mov rcx, 0x100  ; 100 bytes to scan
+00 00 A0 48
+00 00 A0 C7
+00 00 A0 C1
+00 00 A0 00
+00 00 A0 01
+00 00 A0 00
+00 00 A0 00
+
+; .scan: cmp byte [rsi], 0x20
+00 00 A0 80
+00 00 A0 3C
+00 00 A0 20
+; je .null_term (target 0x90, disp = 0x90 - 0x86 = 0x0A)
+00 00 A0 74
+00 00 A0 0A
+; inc rsi
+00 00 A0 48
+00 00 A0 FF
+00 00 A0 C6
+; dec rcx
+00 00 A0 48
+00 00 A0 FF
+00 00 A0 C9
+; jnz .scan (target 0x80, disp = 0x80 - 0x8E = -14 = 0xF2)
+00 00 A0 75
+00 00 A0 F2
+; jmp .done (target 0x90, disp = 0)
+00 00 A0 EB
+00 00 A0 00
+
+; .null_term: mov byte [rsi], 0
+00 00 A0 C6
+00 00 A0 06
+00 00 A0 00
+
+; .done: rsi = start of argv[1] in stack copy (null-terminated)
+
+; Set rsi as r12 for H_50, then LOADFILE
+; mov r12, rsi  ; 49 89 F4
+00 00 A0 49
+00 00 A0 89
+00 00 A0 F4
+; mov rsi, r12 (path)
+00 00 A0 4C
+00 00 A0 89
+00 00 A0 E6
+00 00 50 00 00 00
+
+; After H_50: rax = contentBuf, rdx = fileSize
+; ret rax
+00 00 FF
+
+; Cleanup
+00 00 A0 48
+00 00 A0 81
+00 00 A0 C4
+00 00 A0 00
+00 00 A0 10
+00 00 A0 00
+00 00 A0 00
+00 00 A0 5B
+00 00 A0 41
+00 00 A0 5E
+00 00 A0 41
+00 00 A0 5D
+00 00 A0 41
+00 00 A0 5C
+00 00 FF

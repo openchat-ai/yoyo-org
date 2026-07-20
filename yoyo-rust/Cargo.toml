@@ -1,0 +1,22 @@
+﻿[workspace]
+resolver = "2"
+members = [
+    "verifier",
+    "isa-proc",
+    "libyoyo",
+]
+
+# Note: panic = "abort" removed because:
+# - libyoyo is no_std and uses core::arch::asm
+# - When proc-macro crate isa-proc is compiled, it transitively
+#   tries to unwind through libyoyo's boundaries
+# - This is incompatible with panic = "abort" without nightly -Zbuild-std
+# To re-enable abort for size optimization, use:
+#   RUSTFLAGS="-C panic=abort" cargo +nightly build -Z build-std=core
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

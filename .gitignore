@@ -1,0 +1,91 @@
+# Only upload what's needed for spec compliance + reproducibility
+# Everything else in yoyo-org is local-only
+
+# Build outputs (Rust + Node + NASM)
+build/
+*.obj
+*.o
+*.dll
+*.so
+*.a
+*.lib
+node_modules/
+target/
+
+# Local scripts used during debugging
+insert-section.ps1
+inspect-pe.ps1
+inspect-pe2.ps1
+
+# Allow experiments/*.exe (we want to upload those!)
+!experiments/**/*.exe
+
+# yoyo-js historical debug artifacts
+*.strace
+*.elf
+*.bak
+*.wsl
+*.bin
+*.hex
+*.zip
+*.win-bak
+gen*.exe
+gen*.elf
+input.ky
+input.ky.bak
+input.ky.wsl
+?????8???@@??????   # Weird filename from compile error capture
+yoyo-ai/            # AI experiment scripts (not part of canonical source)
+yoyo-ai*
+yoyo-ai.*
+
+# yoyo-rust historical debug artifacts
+projects/ternary_signal.ty   # local test only
+test-allocs.ty
+test-empty.ty
+test-load*.ty
+test-mem*.ty
+test-min*.ty
+test-phase1.ty
+test-prefix.ty
+test-va*.ty
+test-write*.ty
+test-min3.ty
+top-write.ty
+yoyo-blob.ty
+yoyo-noblob.ty
+yoyo-24bit.ty
+yoyo-win.ty
+yoyo.ty.bak
+mini-test.ty
+
+# Trash staging area (local-only, never track)
+_trash/
+
+# yoyo-asm historical debug artifacts
+yoyo-asm/yoy0-*
+yoyo-asm/yoyo.ty
+yoyo-asm/minimal.ky
+yoyo-asm/output-fixed.exe
+yoyo-asm/temp-*
+yoyo-asm/code_dump.bin
+yoyo-asm/run-test-output.exe
+yoyo-asm/test-minimal.asm
+yoyo-asm/test-ret.asm
+yoyo-asm/mini-parse.asm
+yoyo-asm/build-yoyo-asm.mjs
+yoyo-asm/output-v*.exe
+yoyo-asm/yoyo-asm.v*.asm
+yoyo-asm/yoyo-asm.v*.exe
+yoyo-asm/v3-final.exe
+yoyo-asm/yoyo-asm-core.asm
+yoyo-asm/build/
+
+# Root-level debug scripts
+/_debug_pe.py
+/fix-pe-iat.py
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

@@ -1,0 +1,47 @@
+# yoyo-org MEMORY.md — 项目记忆与路径
+
+> yoyo-org 是 4-子项目 monorepo：`yoyo-js` (Node.js)、`yoyo-rust` (Rust)、
+> `yoyo` (自举中)、`yoyo-asm` (x64 汇编 ground truth)。
+
+## 经验教训
+
+### [2026-07-10] Experiment 1 完成：yoyo-asm bootstrap + Trusting Trust 验证
+- **三实现交叉编译 H_00→RET 最小测试**：JS / Rust / x64 asm 三种语言独立实现，
+  编译同一份 21 字节输入，产出结构等价的 PE 二进制
+- **H_00 handler 在三份产物中都 = 单条 `C3` (RET)** — 字节级一致
+- **三份产物的 startup 序列语义一致**：`sub rsp / call H_00 / add rsp / ret`
+- **意外发现 yoyo-rust 有 bug**：stub 平台产物 PE 头 Import Lookup Table 全 0，
+  Windows 拒绝加载。**这恰好证明了 Thompson 多样性验证的价值** — 单读源码发现不了
+- **教训**：源码审计不够，必须**跑**、必须**三方对比**、必须**看产物**
+
+### [2026-07-10] yoyo-asm parser 调试踩的 3 个坑
+- **parse_byte 子程序行为异常**：用 `call parse_byte` 时 inst_count 始终 = 1，原因未完全查明
+- **hex 解析不支持 a-f**：内联 `sub al, '0'` 只处理数字，`ff` 被解析为 `0x76`
+- **.hex_to_nibble fall-through bug**：子程序定义在 parse 函数**中间**，第三个 hex byte 解析
+  后穿透执行了 .hex_to_nibble 的 cmp/jbe 链，**而不是** store 代码，导致段错误
+- **教训**：局部标签插入函数中间很危险，NASM 局部标签作用域要严格控制
+
+### [2026-07-10] 实验目录组织原则
+- **.gitignore 必须过滤所有 build/debug 产物**：*.obj, *.exe (除刻意保留的), build/, *.bin
+- **必须上传的最小集**：
+  - 编译器源码 (3 个) — 让 pull 后能跑
+  - 共享输入 — 1 份
+  - 3 个产物 — 验证证据
+  - 报告 — 解释为什么可信
+  - build-and-run 脚本 — 一键复现
+- **教训**：reproducibility > 完整性，只上传"能复现全过程"的最小集
+
+## 当前项目状态
+
+| 项目 | 状态 | 用途 |
+|------|------|------|
+| yoyo-js | ✅ 可用 (DDC verified) | JS 实现，主力编译器 |
+| yoyo-rust | ✅ 可用但 stub 平台 PE 有 bug | Rust 实现 |
+| yoyo | 进行中 | 自举编译器 (Linux 已 work) |
+| yoyo-asm | ✅ Phase 1 done | x64 asm ground truth |
+
+## 下一步
+
+- Experiment 2：让三实现都编译完整 `yoyo.ty`（2522 行自举编译器），进一步审计自举编译器
+- 修复 yoyo-rust 的 stub 平台 PE ILT bug
+- 扩展 yoyo-asm 支持更多 opcode（30, 60, 65, 66, 68, 70）以实现完整自举

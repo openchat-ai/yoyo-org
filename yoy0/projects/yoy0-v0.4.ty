@@ -1,0 +1,11 @@
+; =============================================================================
+; yoy0.ty v0.4 — argv-aware self-hosting compiler (MVP: copy input.ty → output.exe)
+; =============================================================================
+;
+; H_00 body is now generated entirely by Rust emit_h00_code() in platform.rs.
+; No A0 (raw byte) lines needed — the Rust code emits all prologue, argv
+; parsing, H_50/H_51 calls, and epilogue automatically.
+; =============================================================================
+
+00 00 40 40
+00 00 FF
