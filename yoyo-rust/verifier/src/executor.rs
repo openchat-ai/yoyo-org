@@ -140,6 +140,7 @@ pub fn emit_v3_executor(asm: &mut X64Assembler) -> IsaResult<()> {
     let h_mcpd1 = asm.alloc_label(); let h_mcpd2 = asm.alloc_label();
     let h_mcps1 = asm.alloc_label(); let h_mcps2 = asm.alloc_label();
     let h_raw1 = asm.alloc_label(); let h_raw2 = asm.alloc_label();
+    let h_rawb1 = asm.alloc_label(); let h_rawb2 = asm.alloc_label();
     let after_jcc1 = asm.alloc_label(); let after_jcc2 = asm.alloc_label();
 
     // ══════ PASS 1 ══════
@@ -170,6 +171,7 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     asm.cmp_al_imm8(0x84); asm.jcc_rel8_label(4, h_mcpd1);
     asm.cmp_al_imm8(0x85); asm.jcc_rel8_label(4, h_mcps1);
     asm.cmp_al_imm8(0xA0); asm.jcc_rel8_label(4, h_raw1);
+    asm.cmp_al_imm8(0xA1); asm.jcc_rel8_label(4, h_rawb1);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret1);
     asm.jmp_rel8_label(skip1); // unknown → skip
 
@@ -248,6 +250,12 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
 
     // RAW_BYTE pass1: read byte → add r8, 4
     asm.set_label(h_raw1);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
+    raw(asm, &[0x49, 0x83, 0xC0, 0x04]); // add r8, 4
+    asm.jmp_rel8_label(p1_loop);
+
+    // RAW_BYTES pass1: read 1 byte → add r8, 4 (skip, variable-length handled by prefix_read)
+    asm.set_label(h_rawb1);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip1);
     raw(asm, &[0x49, 0x83, 0xC0, 0x04]); // add r8, 4
     asm.jmp_rel8_label(p1_loop);
@@ -358,6 +366,7 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     asm.cmp_al_imm8(0x84); asm.jcc_rel8_label(4, h_mcpd2);
     asm.cmp_al_imm8(0x85); asm.jcc_rel8_label(4, h_mcps2);
     asm.cmp_al_imm8(0xA0); asm.jcc_rel8_label(4, h_raw2);
+    asm.cmp_al_imm8(0xA1); asm.jcc_rel8_label(4, h_rawb2);
     asm.cmp_al_imm8(0xFF); asm.jcc_rel8_label(4, h_ret2);
     asm.jmp_rel8_label(skip2);
 
@@ -814,16 +823,44 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8
     asm.jmp_rel8_label(p2_loop);
 
-    // ══ MEMCPY_DATA pass2: emit data inline + rep movsb ══
-    // Copy from embedded data at data_lbl to state[dd], ll bytes
+// ══ MEMCPY_DATA pass2: read ll bytes of data from hex stream, emit inline + rep movsb ══
     asm.set_label(h_mcpd2);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC1]); // mov r9b, al (dd → R9B)
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
-    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ss → R8B, unused but read)
+    raw(asm, &[0x41, 0x88, 0xC0]); // mov r8b, al (ss → R8B)
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     raw(asm, &[0x41, 0x88, 0xC3]); // mov r11b, al (ll → R11B)
-    // TODO: MEMCPY_DATA needs to embed data inline. Simplified: just advance RDI (no-op for now)
+    // Read ll bytes of data from hex stream and emit via stosb
+    // xor ecx,ecx; mov cl, r11b
+    raw(asm, &[0x31, 0xC9]); // xor ecx, ecx
+    raw(asm, &[0x44, 0x88, 0xD9]); // mov cl, r11b (RCX = ll)
+    // Save RDI as data start (R12 = data position in output buffer)
+    raw(asm, &[0x49, 0x89, 0xFC]); // mov r12, rdi
+    let rd_loop = asm.alloc_label();
+    let rd_done = asm.alloc_label();
+    asm.set_label(rd_loop);
+    raw(asm, &[0x49, 0xE3, 0x0A]); // jecxz rd_done (rel8, ~10 bytes)
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
+    asm.stosb(); // emit data byte
+    raw(asm, &[0xE2, 0xF4]); // loop rd_loop (rel8, -12 bytes)
+    asm.set_label(rd_done);
+    // Now RDI is past the data. R12 = data start.
+    // Emit: mov rsi, r12; mov rdi, [r15+dd*8]; mov rcx, rdi; sub rcx, r12; rep movsb
+    // But we know ll (R11B), so: mov rsi, r12; mov rdi, [r15+dd*8]; mov cl, r11b; rep movsb
+    raw(asm, &[0x4D, 0x89, 0xE6]); // mov r14, r12 (RSI = data start)
+    // mov rdi, [r15+dd*8] → 49 8B 7F <dd*8>
+    raw(asm, &[0xB0, 0x49]); asm.stosb(); raw(asm, &[0xB0, 0x8B]); asm.stosb();
+    raw(asm, &[0xB0, 0x7F]); asm.stosb();
+    raw(asm, &[0x41, 0x8A, 0xC1]); raw(asm, &[0xC0, 0xE0, 0x03]); asm.stosb(); // al = r9b*8 (dd)
+    // mov rcx, ll (31 C9 44 88 D9)
+    raw(asm, &[0xB0, 0x31]); asm.stosb(); raw(asm, &[0xB0, 0xC9]); asm.stosb(); // xor ecx,ecx
+    raw(asm, &[0xB0, 0x44]); asm.stosb(); raw(asm, &[0xB0, 0x88]); asm.stosb(); raw(asm, &[0xB0, 0xD9]); asm.stosb(); // mov cl, r11b
+    // rep movsb (F3 A4) — but wait, RSI = R14, not R12. Need to set RSI first.
+    // mov rsi, r14 (4C 89 F6)
+    raw(asm, &[0xB0, 0x4C]); asm.stosb(); raw(asm, &[0xB0, 0x89]); asm.stosb(); raw(asm, &[0xB0, 0xF6]); asm.stosb();
+    // rep movsb (F3 A4)
+    raw(asm, &[0xB0, 0xF3]); asm.stosb(); raw(asm, &[0xB0, 0xA4]); asm.stosb();
     asm.jmp_rel8_label(p2_loop);
 
     // ══ MEMCPY_STATE pass2: emit 49 8B 77 <ss*8> 49 8B 7F <dd*8> 49 C7 C1 <ll> F3 A4 ══
@@ -854,7 +891,12 @@ asm.cmp_al_imm8(0x70); asm.jcc_rel8_label(4, h_jmp1);
     // ══ RAW_BYTE pass2: emit the byte directly via stosb ══
     asm.set_label(h_raw2);
     asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
-    // AL contains the byte value. Just emit via stosb.
+    asm.stosb();
+    asm.jmp_rel8_label(p2_loop);
+
+    // ══ RAW_BYTES pass2: emit the byte via stosb (first byte only) ══
+    asm.set_label(h_rawb2);
+    asm.call_rel32_label(sw); asm.call_rel32_label(rh); asm.jcc_rel8_label(2, skip2);
     asm.stosb();
     asm.jmp_rel8_label(p2_loop);
 
