@@ -76,7 +76,19 @@ function createWinEmitContext(prog, opts = {}) {
     code.iatFixups.push({ o, dispPos: _p, instrEnd: CODE_RVA + _e, isLd: 1 });
   }
   function lr(r, b, d) { E.lea_rr(code, r, b, d); }
-  function stSet(id, v) { E.mov_ri(code, RAX, BigInt(v)); E.mov_mr64(code, R15, id * 8, RAX); }
+  function stSet(id, v) {
+    // V3-compatible: 49 C7 47 <disp8> <simm32> (8 bytes)
+    code.u8(0x49); code.u8(0xC7); code.u8(0x47); code.u8(id * 8);
+    code.u32(v >>> 0);
+  }
+  function stInc(id) {
+    // 49 FF 47 <disp8> (4 bytes) — inc qword [r15+disp8]
+    code.u8(0x49); code.u8(0xFF); code.u8(0x47); code.u8(id * 8);
+  }
+  function stDec(id) {
+    // 49 FF 4F <disp8> (4 bytes) — dec qword [r15+disp8]
+    code.u8(0x49); code.u8(0xFF); code.u8(0x4F); code.u8(id * 8);
+  }
   function stGet(reg, id) { E.mov_rm64(code, reg, R15, id * 8); }
   function stPut(id, reg) { E.mov_mr64(code, R15, id * 8, reg); }
   function stAdd(id, v) { stGet(RAX, id); E.add_ri(code, RAX, v); stPut(id, RAX); }
@@ -191,8 +203,8 @@ function createWinEmitContext(prog, opts = {}) {
     else if (o === 0x61) stAdd(a[0].v, a[1].v);
     else if (o === 0x62) stSub(a[0].v, a[1].v);
     else if (o === 0x63) { stGet(RAX, a[0].v); stGet(RDX, a[1].v); E.imul_rr(code, RAX, RDX); stPut(a[0].v, RAX); }
-    else if (o === 0x66) { stGet(RAX, a[0].v); E.add_ri(code, RAX, 1); stPut(a[0].v, RAX); }
-    else if (o === 0x67) { stGet(RAX, a[0].v); E.sub_ri(code, RAX, 1); stPut(a[0].v, RAX); }
+    else if (o === 0x66) { stInc(a[0].v); }
+    else if (o === 0x67) { stDec(a[0].v); }
     else if (o === 0x68) { stGet(RAX, a[0].v); stGet(RDX, a[1].v); E.add_rr(code, RAX, RDX); stPut(a[0].v, RAX); }
     else if (o === 0x69) { stGet(RAX, a[0].v); stGet(RDX, a[1].v); E.sub_rr(code, RAX, RDX); stPut(a[0].v, RAX); }
     else if (o === 0x65) stCmp(a[0].v, a[1].v);
@@ -343,17 +355,21 @@ function createWinEmitContext(prog, opts = {}) {
   }
 
   function emitStartup() {
-    E.mov_ri(code, RCX, 0n); E.mov_ri(code, RDX, 0x20000n);
-    E.mov_ri(code, R8, 0x3000n); E.mov_ri(code, R9, 0x40n);
-    ci('KERNEL32.dll.VirtualAlloc'); E.mov_rr(code, R15, RAX);
-    const leaData = code.tell();
-    E.lea_rip(code, 0, dr - (CODE_RVA + leaData + 7));
-    E.mov_mr64(code, R15, 8 * 8, 0);
-    E.mov_ri(code, RCX, -11n); ci('KERNEL32.dll.GetStdHandle'); E.mov_rr(code, R14, RAX);
+    // V3-compatible startup stub: stack-based state, call generated code, ExitProcess
+    E.sub_ri(code, RSP, 0x1008);
+    E.lea_rr(code, R15, RSP, 0x808);
+    E.call_rel(code, 0); code.fixups.push({ p: code.tell() - 4, n: 'H00' });
+    E.add_ri(code, RSP, 0x1008);
+    code.u8(0x31); code.u8(0xC9); // xor ecx,ecx (32-bit, matches V3)
+    // Direct IAT call to ExitProcess (no shadow space, matching V3)
+    const r = P['KERNEL32.dll.ExitProcess'];
+    const c = CODE_RVA + code.tell();
+    E.call_rip(code, r - (c + 6));
+    code.iatFixups.push({ importName: 'KERNEL32.dll.ExitProcess', dispPos: code.tell() - 4, instrEnd: c + 6 });
   }
 
   function emitExit() {
-    E.xor_rr(code, RCX, RCX); ci('KERNEL32.dll.ExitProcess');
+    // ExitProcess is already in startup stub — no-op
   }
 
   function resolveFixups() {
@@ -509,7 +525,6 @@ function compileFromAnalyzed(prog, opts = {}) {
     if (!ops) continue;
     ctx.code.label('H' + h);
     for (const op of ops) ctx.emit(op);
-    E.ret(ctx.code);
   }
   return ctx.finishPe();
 }

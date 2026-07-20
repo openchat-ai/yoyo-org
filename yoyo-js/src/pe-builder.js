@@ -1,4 +1,4 @@
-const SA=0x1000,FA=0x400,IB=0x140000000n;
+const SA=0x1000,FA=0x200,IB=0x140000000n;
 const _=v=>((v+FA-1)/FA|0)*FA;
 const _s=v=>((v+SA-1)/SA|0)*SA;
 
