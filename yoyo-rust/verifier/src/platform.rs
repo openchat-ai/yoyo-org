@@ -340,9 +340,7 @@ impl Platform for Win32Platform {
         a.pop(Reg::R14);
         a.pop(Reg::R13);
         a.pop(Reg::R12);
-        // H_00's return value is already in RAX (typically CloseHandle's
-        // success/failure). Pass as ExitProcess's uExitCode.
-        a.mov_rr(Reg::Rcx, Reg::Rax);
+        a.mov_imm64(Reg::Rcx, 0);
         a.call_iat_thunk(Win32Api::LibyoyoExit as u8);
         a.ret(); // unreachable; ExitProcess never returns
         a.into_bytes()
